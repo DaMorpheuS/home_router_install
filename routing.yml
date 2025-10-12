@@ -17,6 +17,9 @@
     vlan4_network: 192.168.4.0/24
     vlan4_interface: enp3s0.4
     
+    vlan5_network: 192.168.5.0/24
+    vlan5_interface: enp3s0.5
+    
   tasks:
     - name: Gather distribution facts
       ansible.builtin.setup:
@@ -65,6 +68,7 @@
           define MAIN_NET = {{ main_network }}
           define VLAN3_NET = {{ vlan3_network }}
           define VLAN4_NET = {{ vlan4_network }}
+          define VLAN5_NET = {{ vlan5_network }}
           
           # Main table for filtering and NAT
           table inet filter {
@@ -80,14 +84,14 @@
                   ct state established,related accept
                   
                   # Allow ICMP (ping) from local networks
-                  ip saddr { $MAIN_NET, $VLAN3_NET, $VLAN4_NET } icmp type echo-request accept
+                  ip saddr { $MAIN_NET, $VLAN3_NET, $VLAN4_NET, $VLAN5_NET } icmp type echo-request accept
                   
                   # Allow SSH from all local networks (for management)
-                  ip saddr { $MAIN_NET, $VLAN3_NET, $VLAN4_NET } tcp dport 22 accept
+                  ip saddr { $MAIN_NET, $VLAN3_NET, $VLAN4_NET, $VLAN5_NET } tcp dport 22 accept
                   
                   # Allow DNS from local networks
-                  ip saddr { $MAIN_NET, $VLAN3_NET, $VLAN4_NET } udp dport 53 accept
-                  ip saddr { $MAIN_NET, $VLAN3_NET, $VLAN4_NET } tcp dport 53 accept
+                  ip saddr { $MAIN_NET, $VLAN3_NET, $VLAN4_NET, $VLAN5_NET } udp dport 53 accept
+                  ip saddr { $MAIN_NET, $VLAN3_NET, $VLAN4_NET, $VLAN5_NET } tcp dport 53 accept
                   
                   # Allow DHCP from local networks
                   udp dport { 67, 68 } accept
@@ -109,6 +113,9 @@
                 
                 # Main network can access VLAN 4
                 ip saddr $MAIN_NET ip daddr $VLAN4_NET accept
+                
+                # Main network can access VLAN 5 (guest network)
+                ip saddr $MAIN_NET ip daddr $VLAN5_NET accept
                 
                 # Main network can access internet
                 ip saddr $MAIN_NET oifname "{{ wan_interface }}" accept
@@ -132,6 +139,15 @@
                 
                 # Block VLAN 4 to VLAN 3
                 ip saddr $VLAN4_NET ip daddr $VLAN3_NET drop
+                
+                # === VLAN 5 (192.168.5.0/24) - Guest Network - Internet Only ===
+                # VLAN 5 can ONLY access internet (no access to any local networks)
+                ip saddr $VLAN5_NET oifname "{{ wan_interface }}" accept
+                
+                # Block VLAN 5 from all local networks
+                ip saddr $VLAN5_NET ip daddr $MAIN_NET drop
+                ip saddr $VLAN5_NET ip daddr $VLAN3_NET drop
+                ip saddr $VLAN5_NET ip daddr $VLAN4_NET drop
                   
                   # Log dropped packets (optional, for debugging)
                   # log prefix "FORWARD-dropped: "
@@ -154,6 +170,7 @@
                   ip saddr $MAIN_NET oifname "{{ wan_interface }}" masquerade
                   ip saddr $VLAN3_NET oifname "{{ wan_interface }}" masquerade
                   ip saddr $VLAN4_NET oifname "{{ wan_interface }}" masquerade
+                  ip saddr $VLAN5_NET oifname "{{ wan_interface }}" masquerade
               }
           }
       tags: firewall
@@ -204,16 +221,18 @@
           
           Network Layout:
           - Main Network:  {{ main_network }} ({{ main_interface }})
-          - VLAN 3:        {{ vlan3_network }} ({{ vlan3_interface }})
-          - VLAN 4:        {{ vlan4_network }} ({{ vlan4_interface }})
+          - VLAN 3:        {{ vlan3_network }} ({{ vlan3_interface }}) - Private Network
+          - VLAN 4:        {{ vlan4_network }} ({{ vlan4_interface }}) - Home Assistant
+          - VLAN 5:        {{ vlan5_network }} ({{ vlan5_interface }}) - Guest Network
           - WAN:           {{ wan_interface }}
           
           Routing Rules (nftables):
           1. All networks have internet access through {{ wan_interface }}
           2. Main network ({{ main_network }}) can access all VLANs
-          3. VLAN 3 ({{ vlan3_network }}) is isolated - only internet and own VLAN
-          4. VLAN 4 ({{ vlan4_network }}) is isolated - only internet and own VLAN
-          5. VLAN 3 and VLAN 4 cannot communicate with each other
+          3. VLAN 3 ({{ vlan3_network }}) is isolated - only internet and main network
+          4. VLAN 4 ({{ vlan4_network }}) is isolated - only internet and main network
+          5. VLAN 5 ({{ vlan5_network }}) is GUEST - ONLY internet access (fully isolated)
+          6. VLAN 3 and VLAN 4 cannot communicate with each other
           
           Management Commands:
           - View all rules:          nft list ruleset
@@ -246,4 +265,16 @@
           - ping 8.8.8.8 (internet) - should work
           - ping 192.168.2.x (main network) - should work
           - ping 192.168.3.x (VLAN 3) - should FAIL
+      tags: testing
+      
+    - name: Test routing from VLAN 5 (optional)
+      ansible.builtin.debug:
+        msg: |
+          To test VLAN 5 (Guest Network) isolation, from a device on VLAN 5:
+          - ping 192.168.5.1 (gateway) - should work
+          - ping 8.8.8.8 (internet) - should work
+          - ping 192.168.2.x (main network) - should FAIL
+          - ping 192.168.3.x (VLAN 3) - should FAIL
+          - ping 192.168.4.x (VLAN 4) - should FAIL
+          Guest network is fully isolated - internet access only!
       tags: testing

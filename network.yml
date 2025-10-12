@@ -137,6 +137,23 @@
       tags: configure
       when: vlan4_interface is defined and vlan4_ip is defined
       
+    - name: Configure VLAN 5 interface
+      ansible.builtin.blockinfile:
+        path: /etc/network/interfaces
+        block: |
+          # VLAN 5 interface - Configured by Ansible
+          auto {{ vlan5_interface }}
+          iface {{ vlan5_interface }} inet static
+              address {{ vlan5_ip }}
+              netmask {{ vlan5_netmask }}
+              vlan-raw-device {{ local_interface }}
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - VLAN5"
+        create: yes
+        mode: '0644'
+      notify: restart networking
+      tags: configure
+      when: vlan5_interface is defined and vlan5_ip is defined
+      
     - name: Enable IP forwarding (required for routing)
       ansible.posix.sysctl:
         name: net.ipv4.ip_forward
@@ -200,6 +217,20 @@
         msg: "VLAN 4 interface {{ vlan4_interface }} status: {{ 'EXISTS' if vlan4_check.rc == 0 else 'NOT FOUND' }}"
       tags: validate
       when: vlan4_interface is defined
+      
+    - name: Check if VLAN 5 interface exists
+      ansible.builtin.command: ip link show {{ vlan5_interface }}
+      register: vlan5_check
+      ignore_errors: yes
+      changed_when: false
+      tags: validate
+      when: vlan5_interface is defined
+      
+    - name: Display VLAN 5 status
+      ansible.builtin.debug:
+        msg: "VLAN 5 interface {{ vlan5_interface }} status: {{ 'EXISTS' if vlan5_check.rc == 0 else 'NOT FOUND' }}"
+      tags: validate
+      when: vlan5_interface is defined
       
   handlers:
     - name: restart networking
