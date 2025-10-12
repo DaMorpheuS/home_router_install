@@ -1,0 +1,183 @@
+---
+- name: Common operations for router setup
+  hosts: router
+  become: yes
+  
+  vars:
+    router_user: rkaper
+    
+  tasks:
+    - name: Gather distribution facts
+      ansible.builtin.setup:
+        gather_subset:
+          - distribution
+      tags: always
+      
+    - name: Backup existing sources.list
+      ansible.builtin.copy:
+        src: /etc/apt/sources.list
+        dest: /etc/apt/sources.list.backup.{{ ansible_date_time.epoch }}
+        remote_src: yes
+        mode: '0644'
+      tags: repositories
+      when: ansible_distribution == "Debian"
+      
+    - name: Remove broken trixie-security repository from sources.list
+      ansible.builtin.lineinfile:
+        path: /etc/apt/sources.list
+        regexp: '.*trixie-security.*'
+        state: absent
+      tags: repositories
+      when: ansible_distribution == "Debian" and ansible_distribution_release == "trixie"
+      
+    - name: Find all repository files in sources.list.d
+      ansible.builtin.find:
+        paths: /etc/apt/sources.list.d
+        patterns: "*.list"
+      register: sources_list_d_files
+      tags: repositories
+      when: ansible_distribution == "Debian" and ansible_distribution_release == "trixie"
+      
+    - name: Remove trixie-security from sources.list.d files
+      ansible.builtin.lineinfile:
+        path: "{{ item.path }}"
+        regexp: '.*trixie-security.*'
+        state: absent
+      loop: "{{ sources_list_d_files.files }}"
+      tags: repositories
+      when: ansible_distribution == "Debian" and ansible_distribution_release == "trixie" and sources_list_d_files.files is defined
+      
+    - name: Ensure proper Debian Trixie main repository is configured
+      ansible.builtin.lineinfile:
+        path: /etc/apt/sources.list
+        regexp: '^deb\s+http://deb\.debian\.org/debian/?\s+trixie\s+main'
+        line: 'deb http://deb.debian.org/debian/ trixie main contrib non-free non-free-firmware'
+        state: present
+        create: yes
+        mode: '0644'
+      tags: repositories
+      when: ansible_distribution == "Debian" and ansible_distribution_release == "trixie"
+      
+    - name: Ensure proper Debian Trixie updates repository is configured
+      ansible.builtin.lineinfile:
+        path: /etc/apt/sources.list
+        regexp: '^deb\s+http://deb\.debian\.org/debian/?\s+trixie-updates'
+        line: 'deb http://deb.debian.org/debian/ trixie-updates main contrib non-free non-free-firmware'
+        state: present
+        create: yes
+        mode: '0644'
+      tags: repositories
+      when: ansible_distribution == "Debian" and ansible_distribution_release == "trixie"
+      
+    - name: Clean apt cache and lists to remove corrupted metadata
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/apt/lists
+        - /var/cache/apt/archives/partial
+      tags: repositories
+      when: ansible_distribution == "Debian" and ansible_distribution_release == "trixie"
+      
+    - name: Recreate apt lists directory
+      ansible.builtin.file:
+        path: /var/lib/apt/lists
+        state: directory
+        mode: '0755'
+      tags: repositories
+      when: ansible_distribution == "Debian" and ansible_distribution_release == "trixie"
+      
+    - name: Recreate apt partial directory
+      ansible.builtin.file:
+        path: /var/cache/apt/archives/partial
+        state: directory
+        mode: '0755'
+      tags: repositories
+      when: ansible_distribution == "Debian" and ansible_distribution_release == "trixie"
+      
+    - name: Display current sources.list configuration
+      ansible.builtin.command: cat /etc/apt/sources.list
+      register: sources_list_content
+      changed_when: false
+      tags: repositories
+      
+    - name: Show sources.list content
+      ansible.builtin.debug:
+        var: sources_list_content.stdout_lines
+      tags: repositories
+      
+    - name: Force apt update using command line (workaround for Trixie issues)
+      ansible.builtin.command: apt-get update
+      register: apt_update_result
+      changed_when: false
+      failed_when: false
+      tags: update
+      when: ansible_distribution == "Debian" and ansible_distribution_release == "trixie"
+      
+    - name: Display apt update result
+      ansible.builtin.debug:
+        var: apt_update_result
+      tags: update
+      when: ansible_distribution == "Debian" and ansible_distribution_release == "trixie"
+      
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      tags: update
+      when: ansible_distribution != "Debian" or ansible_distribution_release != "trixie"
+      
+    - name: Upgrade all packages to latest version (Trixie)
+      ansible.builtin.command: apt-get upgrade -y
+      tags: update
+      when: ansible_distribution == "Debian" and ansible_distribution_release == "trixie" and apt_update_result.rc == 0
+      
+    - name: Upgrade all packages to latest version (non-Trixie)
+      ansible.builtin.apt:
+        upgrade: dist
+        autoremove: yes
+        autoclean: yes
+      tags: update
+      when: ansible_distribution != "Debian" or ansible_distribution_release != "trixie"
+      
+    - name: Ensure required packages are installed (Trixie)
+      ansible.builtin.command: apt-get install -y sudo vim curl wget git htop net-tools
+      tags: packages
+      register: trixie_package_install
+      changed_when: "'0 upgraded, 0 newly installed' not in trixie_package_install.stdout"
+      when: ansible_distribution == "Debian" and ansible_distribution_release == "trixie"
+      
+    - name: Ensure required packages are installed (non-Trixie)
+      ansible.builtin.apt:
+        name:
+          - sudo
+          - vim
+          - curl
+          - wget
+          - git
+          - htop
+          - net-tools
+        state: present
+      tags: packages
+      when: ansible_distribution != "Debian" or ansible_distribution_release != "trixie"
+      
+    - name: Ensure user {{ router_user }} exists
+      ansible.builtin.user:
+        name: "{{ router_user }}"
+        state: present
+        shell: /bin/bash
+        create_home: yes
+        groups: sudo
+        append: yes
+      tags: user
+      
+      
+    - name: Ensure .ssh directory exists for {{ router_user }}
+      ansible.builtin.file:
+        path: /home/{{ router_user }}/.ssh
+        state: directory
+        owner: "{{ router_user }}"
+        group: "{{ router_user }}"
+        mode: '0700'
+      tags: user
+

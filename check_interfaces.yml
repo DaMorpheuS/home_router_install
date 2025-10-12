@@ -1,0 +1,33 @@
+---
+- name: Check network interfaces
+  hosts: router
+  become: yes
+  gather_facts: yes
+  
+  tasks:
+    - name: Display all network interfaces
+      ansible.builtin.debug:
+        msg: |
+          Available network interfaces:
+          {% for interface in ansible_interfaces %}
+          - {{ interface }}
+          {% endfor %}
+      
+    - name: Show detailed interface information
+      ansible.builtin.debug:
+        var: ansible_facts[item]
+      loop: "{{ ansible_interfaces }}"
+      when: 
+        - item != 'lo'
+        - ansible_facts[item] is defined
+        - ansible_facts[item].get('ipv4') is defined
+      
+    - name: Show current IP addresses
+      ansible.builtin.command: ip addr show
+      register: ip_output
+      changed_when: false
+      
+    - name: Display IP configuration
+      ansible.builtin.debug:
+        msg: "{{ ip_output.stdout_lines }}"
+

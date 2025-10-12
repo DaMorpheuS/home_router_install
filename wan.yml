@@ -1,0 +1,138 @@
+---
+- name: Configure WAN PPPoE connection
+  hosts: router
+  become: yes
+  
+  tasks:
+    - name: Set default values for WAN configuration
+      ansible.builtin.set_fact:
+        wan_physical_interface: "{{ wan_physical_interface | default('enp1s0') }}"
+        wan_vlan: "{{ wan_vlan | default('6') }}"
+        ppp_provider: "{{ ppp_provider | default('kpn') }}"
+        ppp_user: "{{ ppp_user | default('kpn@kpn.nl') }}"
+      tags: always
+    
+    - name: Set WAN VLAN interface name
+      ansible.builtin.set_fact:
+        wan_vlan_interface: "{{ wan_physical_interface }}.{{ wan_vlan }}"
+      tags: always
+    
+    - name: Install PPPoE and VLAN packages
+      ansible.builtin.apt:
+        name:
+          - pppoe
+          - pppoeconf
+          - vlan
+          - ppp
+        state: present
+        update_cache: yes
+      tags: packages
+      
+    - name: Load 8021q kernel module for VLAN support
+      ansible.builtin.modprobe:
+        name: 8021q
+        state: present
+      tags: vlan
+      
+    - name: Ensure 8021q module loads on boot
+      ansible.builtin.lineinfile:
+        path: /etc/modules
+        line: "8021q"
+        create: yes
+        mode: '0644'
+      tags: vlan
+      
+    - name: Configure physical WAN interface in /etc/network/interfaces
+      ansible.builtin.blockinfile:
+        path: /etc/network/interfaces
+        block: |
+          # WAN physical interface - Configured by Ansible
+          auto {{ wan_physical_interface }}
+          iface {{ wan_physical_interface }} inet manual
+                  mtu 1512
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - WAN Physical"
+        create: yes
+        mode: '0644'
+      tags: configure
+      
+    - name: Configure VLAN interface in /etc/network/interfaces
+      ansible.builtin.blockinfile:
+        path: /etc/network/interfaces
+        block: |
+          # WAN VLAN interface - Configured by Ansible
+          auto {{ wan_vlan_interface }}
+          iface {{ wan_vlan_interface }} inet manual
+                  mtu 1508
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - WAN VLAN"
+        create: yes
+        mode: '0644'
+      tags: configure
+      
+    - name: Configure PPP interface in /etc/network/interfaces
+      ansible.builtin.blockinfile:
+        path: /etc/network/interfaces
+        block: |
+          # PPPoE interface - Configured by Ansible
+          auto ppp0
+          iface ppp0 inet ppp
+                  provider {{ ppp_provider }}
+                  accept_ra 2
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - PPPoE"
+        create: yes
+        mode: '0644'
+      tags: configure
+      
+    - name: Ensure /etc/ppp/peers directory exists
+      ansible.builtin.file:
+        path: /etc/ppp/peers
+        state: directory
+        mode: '0755'
+      tags: ppp
+      
+    - name: Create PPP peers configuration file for KPN
+      ansible.builtin.copy:
+        dest: /etc/ppp/peers/{{ ppp_provider }}
+        mode: '0640'
+        content: |
+          noipdefault
+          +ipv6
+          ipv6cp-use-ipaddr
+          defaultroute
+          persist
+          lcp-echo-interval 10
+          lcp-echo-failure 3
+          maxfail 0
+          debug
+          kdebug 7
+          holdoff 10
+          mtu 1500
+          mru 1500
+          plugin rp-pppoe.so {{ wan_vlan_interface }}
+          noauth
+          user "{{ ppp_user }}"
+          usepeerdns # REMOVE AGAIN AFTER INSTALLING DNS CACHE
+      tags: ppp
+      
+    - name: Ensure /etc/ppp/pap-secrets exists
+      ansible.builtin.file:
+        path: /etc/ppp/pap-secrets
+        state: touch
+        mode: '0600'
+        modification_time: preserve
+        access_time: preserve
+      tags: ppp
+      
+    - name: Display WAN configuration summary
+      ansible.builtin.debug:
+        msg: |
+          WAN Configuration Summary:
+          - Physical Interface: {{ wan_physical_interface }}
+          - VLAN Interface: {{ wan_vlan_interface }}
+          - PPP Provider: {{ ppp_provider }}
+          - PPP User: {{ ppp_user }}
+          
+          To start the connection manually: pon {{ ppp_provider }}
+          To stop the connection: poff {{ ppp_provider }}
+          To check status: plog
+      tags: info
+

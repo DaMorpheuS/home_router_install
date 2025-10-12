@@ -1,0 +1,211 @@
+---
+- name: Configure network settings for router
+  hosts: router
+  become: yes
+  
+  vars:
+    # Primary network interface configuration
+    # Override these in inventory.ini or group_vars/host_vars
+    # Defaults are set here if not defined elsewhere
+    local_network: 192.168.2.0
+    local_broadcast: 192.168.2.255
+    local_gateway: 192.168.2.1  # Optional, set if needed
+    
+  tasks:
+    - name: Gather distribution facts
+      ansible.builtin.setup:
+        gather_subset:
+          - distribution
+      tags: always
+      
+    - name: Set default values for network configuration
+      ansible.builtin.set_fact:
+        local_interface: "{{ local_interface | default('eth0') }}"
+        local_ip: "{{ local_ip | default('192.168.2.2') }}"
+        local_netmask: "{{ local_netmask | default('255.255.255.0') }}"
+      tags: always
+    
+    - name: Install network utilities (Trixie)
+      ansible.builtin.command: apt-get install -y ifupdown iproute2 net-tools ethtool vlan
+      tags: packages
+      register: trixie_net_package_install
+      changed_when: "'0 upgraded, 0 newly installed' not in trixie_net_package_install.stdout"
+      when: ansible_distribution == "Debian" and ansible_distribution_release == "trixie"
+    
+    - name: Install network utilities (non-Trixie)
+      ansible.builtin.apt:
+        name:
+          - ifupdown
+          - iproute2
+          - net-tools
+          - ethtool
+          - vlan
+        state: present
+        update_cache: yes
+      tags: packages
+      when: ansible_distribution != "Debian" or ansible_distribution_release != "trixie"
+      
+    - name: Load 8021q kernel module for VLAN support
+      ansible.builtin.modprobe:
+        name: 8021q
+        state: present
+      tags: packages
+      
+    - name: Ensure 8021q module loads on boot
+      ansible.builtin.lineinfile:
+        path: /etc/modules
+        line: '8021q'
+        create: yes
+        mode: '0644'
+      tags: packages
+      
+    - name: Gather network interface facts
+      ansible.builtin.setup:
+        gather_subset:
+          - network
+      tags: facts
+      
+    - name: Display available network interfaces
+      ansible.builtin.debug:
+        msg: "Available interfaces: {{ ansible_interfaces }}"
+      tags: facts
+      
+    - name: Backup current network interfaces configuration
+      ansible.builtin.copy:
+        src: /etc/network/interfaces
+        dest: /etc/network/interfaces.backup.{{ ansible_date_time.epoch }}
+        remote_src: yes
+        mode: '0644'
+      tags: backup
+      
+    - name: Remove any existing DHCP configuration for {{ local_interface }}
+      ansible.builtin.lineinfile:
+        path: /etc/network/interfaces
+        regexp: '^iface\s+{{ local_interface }}\s+inet\s+dhcp'
+        state: absent
+      tags: configure
+      
+    - name: Configure static IP for {{ local_interface }}
+      ansible.builtin.blockinfile:
+        path: /etc/network/interfaces
+        block: |
+          # Primary network interface - Configured by Ansible
+          auto {{ local_interface }}
+          iface {{ local_interface }} inet static
+              address {{ local_ip }}
+              netmask {{ local_netmask }}
+              network {{ local_network }}
+              broadcast {{ local_broadcast }}
+              # gateway {{ local_gateway }}  # Uncomment if you need a gateway
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - {{ local_interface }}"
+        create: yes
+        mode: '0644'
+      notify: restart networking
+      tags: configure
+      
+    - name: Configure VLAN 3 interface
+      ansible.builtin.blockinfile:
+        path: /etc/network/interfaces
+        block: |
+          # VLAN 3 interface - Configured by Ansible
+          auto {{ vlan3_interface }}
+          iface {{ vlan3_interface }} inet static
+              address {{ vlan3_ip }}
+              netmask {{ vlan3_netmask }}
+              vlan-raw-device {{ local_interface }}
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - VLAN3"
+        create: yes
+        mode: '0644'
+      notify: restart networking
+      tags: configure
+      when: vlan3_interface is defined and vlan3_ip is defined
+      
+    - name: Configure VLAN 4 interface
+      ansible.builtin.blockinfile:
+        path: /etc/network/interfaces
+        block: |
+          # VLAN 4 interface - Configured by Ansible
+          auto {{ vlan4_interface }}
+          iface {{ vlan4_interface }} inet static
+              address {{ vlan4_ip }}
+              netmask {{ vlan4_netmask }}
+              vlan-raw-device {{ local_interface }}
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - VLAN4"
+        create: yes
+        mode: '0644'
+      notify: restart networking
+      tags: configure
+      when: vlan4_interface is defined and vlan4_ip is defined
+      
+    - name: Enable IP forwarding (required for routing)
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        sysctl_set: yes
+        state: present
+        reload: yes
+      tags: routing
+      
+    - name: Disable IPv6 (optional, uncomment if needed)
+      ansible.posix.sysctl:
+        name: "{{ item }}"
+        value: '1'
+        sysctl_set: yes
+        state: present
+        reload: yes
+      loop:
+        - net.ipv6.conf.all.disable_ipv6
+        - net.ipv6.conf.default.disable_ipv6
+      tags: 
+        - routing
+        - ipv6
+      when: false  # Set to true if you want to disable IPv6
+      
+    - name: Check if interface exists
+      ansible.builtin.command: ip link show {{ local_interface }}
+      register: interface_check
+      ignore_errors: yes
+      changed_when: false
+      tags: validate
+      
+    - name: Display interface status
+      ansible.builtin.debug:
+        msg: "Interface {{ local_interface }} status: {{ 'EXISTS' if interface_check.rc == 0 else 'NOT FOUND' }}"
+      tags: validate
+      
+    - name: Check if VLAN 3 interface exists
+      ansible.builtin.command: ip link show {{ vlan3_interface }}
+      register: vlan3_check
+      ignore_errors: yes
+      changed_when: false
+      tags: validate
+      when: vlan3_interface is defined
+      
+    - name: Display VLAN 3 status
+      ansible.builtin.debug:
+        msg: "VLAN 3 interface {{ vlan3_interface }} status: {{ 'EXISTS' if vlan3_check.rc == 0 else 'NOT FOUND' }}"
+      tags: validate
+      when: vlan3_interface is defined
+      
+    - name: Check if VLAN 4 interface exists
+      ansible.builtin.command: ip link show {{ vlan4_interface }}
+      register: vlan4_check
+      ignore_errors: yes
+      changed_when: false
+      tags: validate
+      when: vlan4_interface is defined
+      
+    - name: Display VLAN 4 status
+      ansible.builtin.debug:
+        msg: "VLAN 4 interface {{ vlan4_interface }} status: {{ 'EXISTS' if vlan4_check.rc == 0 else 'NOT FOUND' }}"
+      tags: validate
+      when: vlan4_interface is defined
+      
+  handlers:
+    - name: restart networking
+      ansible.builtin.systemd:
+        name: networking
+        state: restarted
+      # Note: This will temporarily disconnect the SSH session
+      # Consider using async/poll or manual reboot
+
