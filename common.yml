@@ -1,6 +1,6 @@
 ---
 - name: Common operations for router setup
-  hosts: router
+  hosts: routers
   become: yes
   
   vars:
@@ -141,7 +141,7 @@
       when: ansible_distribution != "Debian" or ansible_distribution_release != "trixie"
       
     - name: Ensure required packages are installed (Trixie)
-      ansible.builtin.command: apt-get install -y sudo vim curl wget git htop net-tools
+      ansible.builtin.command: apt-get install -y sudo vim curl wget git htop net-tools pppoe pppoeconf vlan ppp systemd iproute2 ethtool nftables isc-dhcp-server wireguard wireguard-tools qrencode openresolv strongswan strongswan-swanctl strongswan-charon strongswan-pki libcharon-extra-plugins kea-dhcp4-server kea-ctrl-agent kea-admin kea-common conntrack
       tags: packages
       register: trixie_package_install
       changed_when: "'0 upgraded, 0 newly installed' not in trixie_package_install.stdout"
@@ -157,6 +157,29 @@
           - git
           - htop
           - net-tools
+          - pppoe
+          - pppoeconf
+          - vlan
+          - ppp
+          - systemd
+          - iproute2
+          - ethtool
+          - nftables
+          - isc-dhcp-server
+          - wireguard
+          - wireguard-tools
+          - qrencode
+          - openresolv
+          - strongswan
+          - strongswan-swanctl
+          - strongswan-charon
+          - strongswan-pki
+          - libcharon-extra-plugins
+          - kea-dhcp4-server
+          - kea-ctrl-agent
+          - kea-admin
+          - kea-common
+          - conntrack
         state: present
       tags: packages
       when: ansible_distribution != "Debian" or ansible_distribution_release != "trixie"

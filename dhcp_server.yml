@@ -1,6 +1,6 @@
 ---
-- name: Configure DHCP server for router
-  hosts: router
+- name: Configure Kea DHCP server for router
+  hosts: routers
   become: yes
   
   tasks:
@@ -10,146 +10,409 @@
           - distribution
       tags: always
       
-    - name: Install ISC DHCP Server (Trixie)
-      ansible.builtin.command: apt-get install -y isc-dhcp-server
+    - name: Check if Kea DHCP packages are installed
+      ansible.builtin.command: dpkg -l kea-dhcp4-server kea-ctrl-agent kea-admin kea-common
+      register: kea_packages_check
+      changed_when: false
+      failed_when: kea_packages_check.rc != 0
       tags: packages
-      register: trixie_dhcp_install
-      changed_when: "'0 upgraded, 0 newly installed' not in trixie_dhcp_install.stdout"
-      when: ansible_distribution == "Debian" and ansible_distribution_release == "trixie"
       
-    - name: Install ISC DHCP Server (non-Trixie)
-      ansible.builtin.apt:
-        name:
-          - isc-dhcp-server
-        state: present
-        update_cache: yes
-      tags: packages
-      when: ansible_distribution != "Debian" or ansible_distribution_release != "trixie"
+    - name: Ensure Kea configuration directory exists
+      ansible.builtin.file:
+        path: /etc/kea
+        state: directory
+        mode: '0755'
+      tags: configure
       
-    - name: Backup existing DHCP configuration
+    - name: Load VLAN 2 reservations from local file
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/reservations_vlan2.yml"
+        name: vlan2_reservations_data
+      delegate_to: localhost
+      ignore_errors: yes
+      tags: configure
+      
+    - name: Load VLAN 3 reservations from local file
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/reservations_vlan3.yml"
+        name: vlan3_reservations_data
+      delegate_to: localhost
+      ignore_errors: yes
+      tags: configure
+      when: vlan3_interface is defined and vlan3_ip is defined
+      
+    - name: Load VLAN 4 reservations from local file
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/reservations_vlan4.yml"
+        name: vlan4_reservations_data
+      delegate_to: localhost
+      ignore_errors: yes
+      tags: configure
+      when: vlan4_interface is defined and vlan4_ip is defined
+      
+    - name: Load VLAN 5 reservations from local file
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/reservations_vlan5.yml"
+        name: vlan5_reservations_data
+      delegate_to: localhost
+      ignore_errors: yes
+      tags: configure
+      when: vlan5_interface is defined and vlan5_ip is defined
+      
+    - name: Convert VLAN 2 reservations to Kea format
+      ansible.builtin.set_fact:
+        vlan2_kea_reservations: "{{ vlan2_kea_reservations | default([]) + [{'hw-address': item.mac, 'ip-address': item.ip, 'hostname': item.hostname}] }}"
+      loop: "{{ vlan2_reservations_data.reservations | default([]) }}"
+      tags: configure
+      when: vlan2_reservations_data is defined
+      
+    - name: Convert VLAN 3 reservations to Kea format
+      ansible.builtin.set_fact:
+        vlan3_kea_reservations: "{{ vlan3_kea_reservations | default([]) + [{'hw-address': item.mac, 'ip-address': item.ip, 'hostname': item.hostname}] }}"
+      loop: "{{ vlan3_reservations_data.reservations | default([]) }}"
+      tags: configure
+      when: vlan3_interface is defined and vlan3_ip is defined and vlan3_reservations_data is defined
+      
+    - name: Convert VLAN 4 reservations to Kea format
+      ansible.builtin.set_fact:
+        vlan4_kea_reservations: "{{ vlan4_kea_reservations | default([]) + [{'hw-address': item.mac, 'ip-address': item.ip, 'hostname': item.hostname}] }}"
+      loop: "{{ vlan4_reservations_data.reservations | default([]) }}"
+      tags: configure
+      when: vlan4_interface is defined and vlan4_ip is defined and vlan4_reservations_data is defined
+      
+    - name: Convert VLAN 5 reservations to Kea format
+      ansible.builtin.set_fact:
+        vlan5_kea_reservations: "{{ vlan5_kea_reservations | default([]) + [{'hw-address': item.mac, 'ip-address': item.ip, 'hostname': item.hostname}] }}"
+      loop: "{{ vlan5_reservations_data.reservations | default([]) }}"
+      tags: configure
+      when: vlan5_interface is defined and vlan5_ip is defined and vlan5_reservations_data is defined
+      
+    - name: Backup existing Kea DHCP4 configuration
       ansible.builtin.copy:
-        src: /etc/dhcp/dhcpd.conf
-        dest: /etc/dhcp/dhcpd.conf.backup.{{ ansible_date_time.epoch }}
+        src: /etc/kea/kea-dhcp4.conf
+        dest: /etc/kea/kea-dhcp4.conf.backup.{{ ansible_date_time.epoch }}
         remote_src: yes
         mode: '0644'
       tags: backup
       ignore_errors: yes
       
-    - name: Configure DHCP server
+    - name: Configure Kea DHCP4 server
       ansible.builtin.copy:
-        dest: /etc/dhcp/dhcpd.conf
+        dest: /etc/kea/kea-dhcp4.conf
         mode: '0644'
         content: |
-          # DHCP Server Configuration for Home Router
-          # Generated by Ansible
-          
-          # Global settings
-          default-lease-time 600;
-          max-lease-time 7200;
-          authoritative;
-          
-          # DNS settings
-          option domain-name "{{ dhcp_domain | default('home.local') }}";
-          option domain-name-servers {{ dhcp_dns_servers | default('8.8.8.8, 8.8.4.4') }};
-          
-          # Main Network ({{ local_interface }})
-          subnet {{ local_ip | regex_replace('\\.\\d+$', '.0') }} netmask {{ local_netmask }} {
-              range {{ local_dhcp_range_start | default(local_ip | regex_replace('\\.\\d+$', '.50')) }} {{ local_dhcp_range_end | default(local_ip | regex_replace('\\.\\d+$', '.150')) }};
-              option routers {{ local_ip }};
-              option broadcast-address {{ local_ip | regex_replace('\\.\\d+$', '.255') }};
+          {
+            "Dhcp4": {
+              "interfaces-config": {
+                "interfaces": [
+                  "{{ vlan2_interface }}"{% if vlan3_interface is defined %},
+                  "{{ vlan3_interface }}"{% endif %}{% if vlan4_interface is defined %},
+                  "{{ vlan4_interface }}"{% endif %}{% if vlan5_interface is defined %},
+                  "{{ vlan5_interface }}"{% endif %}
+                ]
+              },
+              "control-socket": {
+                "socket-type": "unix",
+                "socket-name": "/run/kea/kea4-ctrl-socket"
+              },
+              "lease-database": {
+                "type": "memfile",
+                "persist": true,
+                "name": "/var/lib/kea/kea-leases4.csv",
+                "lfc-interval": 3600
+              },
+              "valid-lifetime": 600,
+              "max-valid-lifetime": 7200,
+              "renew-timer": 300,
+              "rebind-timer": 500,
+              "option-data": [
+                {
+                  "name": "domain-name-servers",
+                  "data": "{{ dhcp_dns_servers | default('8.8.8.8, 8.8.4.4') }}"
+                },
+                {
+                  "name": "domain-name",
+                  "data": "{{ dhcp_domain | default('home.local') }}"
+                }
+              ],
+              "subnet4": [
+                {
+                  "comment": "VLAN 2 - Main Network",
+                  "interface": "{{ vlan2_interface }}",
+                  "id": 1,
+                  "subnet": "{{ vlan2_ip | regex_replace('\\.\\d+$', '.0') }}/24",
+                  "pools": [
+                    {
+                      "pool": "{{ vlan2_dhcp_range_start | default(vlan2_ip | regex_replace('\\.\\d+$', '.50')) }} - {{ vlan2_dhcp_range_end | default(vlan2_ip | regex_replace('\\.\\d+$', '.150')) }}"
+                    }
+                  ],
+                  "option-data": [
+                    {
+                      "name": "routers",
+                      "data": "{{ vlan2_ip }}"
+                    },
+                    {
+                      "name": "broadcast-address",
+                      "data": "{{ vlan2_broadcast }}"
+                    }
+                  ]{% if vlan2_kea_reservations is defined and vlan2_kea_reservations | length > 0 %},
+                  "reservations": [
+                    {% for reservation in vlan2_kea_reservations %}
+                    {
+                      "hw-address": "{{ reservation['hw-address'] }}",
+                      "ip-address": "{{ reservation['ip-address'] }}",
+                      "hostname": "{{ reservation['hostname'] }}"
+                    }{% if not loop.last %},{% endif %}
+                    {% endfor %}
+                  ]{% endif %}
+                }{% if vlan3_interface is defined and vlan3_ip is defined %},
+                {
+                  "comment": "VLAN 3 - Private Network",
+                  "interface": "{{ vlan3_interface }}",
+                  "id": 2,
+                  "subnet": "{{ vlan3_ip | regex_replace('\\.\\d+$', '.0') }}/24",
+                  "pools": [
+                    {
+                      "pool": "{{ vlan3_dhcp_range_start | default(vlan3_ip | regex_replace('\\.\\d+$', '.50')) }} - {{ vlan3_dhcp_range_end | default(vlan3_ip | regex_replace('\\.\\d+$', '.150')) }}"
+                    }
+                  ],
+                  "option-data": [
+                    {
+                      "name": "routers",
+                      "data": "{{ vlan3_ip }}"
+                    },
+                    {
+                      "name": "broadcast-address",
+                      "data": "{{ vlan3_broadcast }}"
+                    }
+                  ]{% if vlan3_kea_reservations is defined and vlan3_kea_reservations | length > 0 %},
+                  "reservations": [
+                    {% for reservation in vlan3_kea_reservations %}
+                    {
+                      "hw-address": "{{ reservation['hw-address'] }}",
+                      "ip-address": "{{ reservation['ip-address'] }}",
+                      "hostname": "{{ reservation['hostname'] }}"
+                    }{% if not loop.last %},{% endif %}
+                    {% endfor %}
+                  ]{% endif %}
+                }{% endif %}{% if vlan4_interface is defined and vlan4_ip is defined %},
+                {
+                  "comment": "VLAN 4 - Home Assistant Network",
+                  "interface": "{{ vlan4_interface }}",
+                  "id": 3,
+                  "subnet": "{{ vlan4_ip | regex_replace('\\.\\d+$', '.0') }}/24",
+                  "pools": [
+                    {
+                      "pool": "{{ vlan4_dhcp_range_start | default(vlan4_ip | regex_replace('\\.\\d+$', '.50')) }} - {{ vlan4_dhcp_range_end | default(vlan4_ip | regex_replace('\\.\\d+$', '.150')) }}"
+                    }
+                  ],
+                  "option-data": [
+                    {
+                      "name": "routers",
+                      "data": "{{ vlan4_ip }}"
+                    },
+                    {
+                      "name": "broadcast-address",
+                      "data": "{{ vlan4_broadcast }}"
+                    }
+                  ]{% if vlan4_kea_reservations is defined and vlan4_kea_reservations | length > 0 %},
+                  "reservations": [
+                    {% for reservation in vlan4_kea_reservations %}
+                    {
+                      "hw-address": "{{ reservation['hw-address'] }}",
+                      "ip-address": "{{ reservation['ip-address'] }}",
+                      "hostname": "{{ reservation['hostname'] }}"
+                    }{% if not loop.last %},{% endif %}
+                    {% endfor %}
+                  ]{% endif %}
+                }{% endif %}{% if vlan5_interface is defined and vlan5_ip is defined %},
+                {
+                  "comment": "VLAN 5 - Guest Network",
+                  "interface": "{{ vlan5_interface }}",
+                  "id": 4,
+                  "subnet": "{{ vlan5_ip | regex_replace('\\.\\d+$', '.0') }}/24",
+                  "pools": [
+                    {
+                      "pool": "{{ vlan5_dhcp_range_start | default(vlan5_ip | regex_replace('\\.\\d+$', '.50')) }} - {{ vlan5_dhcp_range_end | default(vlan5_ip | regex_replace('\\.\\d+$', '.150')) }}"
+                    }
+                  ],
+                  "option-data": [
+                    {
+                      "name": "routers",
+                      "data": "{{ vlan5_ip }}"
+                    },
+                    {
+                      "name": "broadcast-address",
+                      "data": "{{ vlan5_broadcast }}"
+                    }
+                  ]{% if vlan5_kea_reservations is defined and vlan5_kea_reservations | length > 0 %},
+                  "reservations": [
+                    {% for reservation in vlan5_kea_reservations %}
+                    {
+                      "hw-address": "{{ reservation['hw-address'] }}",
+                      "ip-address": "{{ reservation['ip-address'] }}",
+                      "hostname": "{{ reservation['hostname'] }}"
+                    }{% if not loop.last %},{% endif %}
+                    {% endfor %}
+                  ]{% endif %}
+                }{% endif %}
+              ],
+              "loggers": [
+                {
+                  "name": "kea-dhcp4",
+                  "output_options": [
+                    {
+                      "output": "/var/log/kea/kea-dhcp4.log",
+                      "maxsize": 10485760,
+                      "maxver": 5
+                    }
+                  ],
+                  "severity": "INFO",
+                  "debuglevel": 0
+                }
+              ]
+            }
           }
-          
-          {% if vlan3_interface is defined and vlan3_ip is defined %}
-          # VLAN 3 - Private Network ({{ vlan3_interface }})
-          subnet {{ vlan3_ip | regex_replace('\\.\\d+$', '.0') }} netmask {{ vlan3_netmask }} {
-              range {{ vlan3_dhcp_range_start | default(vlan3_ip | regex_replace('\\.\\d+$', '.50')) }} {{ vlan3_dhcp_range_end | default(vlan3_ip | regex_replace('\\.\\d+$', '.150')) }};
-              option routers {{ vlan3_ip }};
-              option broadcast-address {{ vlan3_ip | regex_replace('\\.\\d+$', '.255') }};
-          }
-          {% endif %}
-          
-          {% if vlan4_interface is defined and vlan4_ip is defined %}
-          # VLAN 4 - Home Assistant Network ({{ vlan4_interface }})
-          subnet {{ vlan4_ip | regex_replace('\\.\\d+$', '.0') }} netmask {{ vlan4_netmask }} {
-              range {{ vlan4_dhcp_range_start | default(vlan4_ip | regex_replace('\\.\\d+$', '.50')) }} {{ vlan4_dhcp_range_end | default(vlan4_ip | regex_replace('\\.\\d+$', '.150')) }};
-              option routers {{ vlan4_ip }};
-              option broadcast-address {{ vlan4_ip | regex_replace('\\.\\d+$', '.255') }};
-          }
-          {% endif %}
-          
-          {% if vlan5_interface is defined and vlan5_ip is defined %}
-          # VLAN 5 - Guest Network ({{ vlan5_interface }})
-          subnet {{ vlan5_ip | regex_replace('\\.\\d+$', '.0') }} netmask {{ vlan5_netmask }} {
-              range {{ vlan5_dhcp_range_start | default(vlan5_ip | regex_replace('\\.\\d+$', '.50')) }} {{ vlan5_dhcp_range_end | default(vlan5_ip | regex_replace('\\.\\d+$', '.150')) }};
-              option routers {{ vlan5_ip }};
-              option broadcast-address {{ vlan5_ip | regex_replace('\\.\\d+$', '.255') }};
-          }
-          {% endif %}
       tags: configure
-      notify: restart dhcpd
+      notify: restart kea-dhcp4
       
-    - name: Configure DHCP server to listen on all interfaces
-      ansible.builtin.lineinfile:
-        path: /etc/default/isc-dhcp-server
-        regexp: '^INTERFACESv4='
-        line: 'INTERFACESv4="{{ local_interface }}{% if vlan3_interface is defined %} {{ vlan3_interface }}{% endif %}{% if vlan4_interface is defined %} {{ vlan4_interface }}{% endif %}{% if vlan5_interface is defined %} {{ vlan5_interface }}{% endif %}"'
-        create: yes
+    - name: Ensure Kea log directory exists
+      ansible.builtin.file:
+        path: /var/log/kea
+        state: directory
+        mode: '0755'
+      tags: configure
+      
+    - name: Ensure Kea runtime directory exists
+      ansible.builtin.file:
+        path: /run/kea
+        state: directory
+        mode: '0755'
+      tags: configure
+      
+    - name: Create systemd override directory for kea-dhcp4-server
+      ansible.builtin.file:
+        path: /etc/systemd/system/kea-dhcp4-server.service.d
+        state: directory
+        mode: '0755'
+      tags: configure
+      
+    - name: Create kea-dhcp4-server service override to wait for network
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/kea-dhcp4-server.service.d/override.conf
         mode: '0644'
+        content: |
+          [Unit]
+          Description=Kea DHCP4 Server
+          After=systemd-networkd.service systemd-networkd-wait-online.service network-online.target
+          Wants=systemd-networkd.service systemd-networkd-wait-online.service network-online.target
+          
+          [Service]
+          # Restart if it fails during boot (e.g. interfaces not ready yet)
+          Restart=on-failure
+          RestartSec=5s
       tags: configure
-      notify: restart dhcpd
+      notify: reload systemd and restart kea-dhcp4
       
-    - name: Ensure DHCP server is enabled and started
+    - name: Validate Kea DHCP4 configuration
+      ansible.builtin.command: kea-dhcp4 -t /etc/kea/kea-dhcp4.conf
+      register: kea_config_test
+      changed_when: false
+      failed_when: kea_config_test.rc != 0
+      tags: validate
+      
+    - name: Display Kea configuration validation result
+      ansible.builtin.debug:
+        var: kea_config_test.stdout_lines
+      tags: validate
+      
+    - name: Ensure Kea DHCP4 server is enabled and started
       ansible.builtin.systemd:
-        name: isc-dhcp-server
+        name: kea-dhcp4-server
         enabled: yes
         state: started
       tags: service
       
-    - name: Display DHCP configuration
-      ansible.builtin.command: cat /etc/dhcp/dhcpd.conf
-      register: dhcp_config
+    - name: Display Kea DHCP4 configuration
+      ansible.builtin.command: cat /etc/kea/kea-dhcp4.conf
+      register: kea_config
       changed_when: false
       tags: validate
       
-    - name: Show DHCP configuration
+    - name: Show Kea DHCP4 configuration
       ansible.builtin.debug:
-        var: dhcp_config.stdout_lines
+        var: kea_config.stdout_lines
       tags: validate
       
-    - name: Check DHCP server status
-      ansible.builtin.command: systemctl status isc-dhcp-server
-      register: dhcp_status
+    - name: Check Kea DHCP4 server status
+      ansible.builtin.command: systemctl status kea-dhcp4-server
+      register: kea_status
       changed_when: false
       ignore_errors: yes
       tags: validate
       
-    - name: Show DHCP server status
+    - name: Show Kea DHCP4 server status
       ansible.builtin.debug:
-        var: dhcp_status.stdout_lines
+        var: kea_status.stdout_lines
       tags: validate
       
-    - name: Display DHCP leases file location
+    - name: Display Kea DHCP server information
       ansible.builtin.debug:
         msg: |
-          DHCP server is configured!
+          Kea DHCP4 server is configured!
           
-          Lease file: /var/lib/dhcp/dhcpd.leases
-          Config file: /etc/dhcp/dhcpd.conf
+          Lease file: /var/lib/kea/kea-leases4.csv
+          Config file: /etc/kea/kea-dhcp4.conf
+          Log file: /var/log/kea/kea-dhcp4.log
+          Control socket: /run/kea/kea4-ctrl-socket
           
-          View active leases: cat /var/lib/dhcp/dhcpd.leases
-          View DHCP logs: journalctl -u isc-dhcp-server -f
-          Restart DHCP: systemctl restart isc-dhcp-server
+          View active leases: cat /var/lib/kea/kea-leases4.csv
+          View DHCP logs: tail -f /var/log/kea/kea-dhcp4.log
+          View systemd logs: journalctl -u kea-dhcp4-server -f
+          Restart DHCP: systemctl restart kea-dhcp4-server
+          Test config: kea-dhcp4 -t /etc/kea/kea-dhcp4.conf
           
-          DHCP Ranges:
-          - Main Network ({{ local_ip | regex_replace('\\.\\d+$', '.0') }}/24): {{ local_dhcp_range_start | default(local_ip | regex_replace('\\.\\d+$', '.50')) }} - {{ local_dhcp_range_end | default(local_ip | regex_replace('\\.\\d+$', '.150')) }}
-          {% if vlan3_ip is defined %}- VLAN 3 ({{ vlan3_ip | regex_replace('\\.\\d+$', '.0') }}/24): {{ vlan3_dhcp_range_start | default(vlan3_ip | regex_replace('\\.\\d+$', '.50')) }} - {{ vlan3_dhcp_range_end | default(vlan3_ip | regex_replace('\\.\\d+$', '.150')) }}{% endif %}
-          {% if vlan4_ip is defined %}- VLAN 4 ({{ vlan4_ip | regex_replace('\\.\\d+$', '.0') }}/24): {{ vlan4_dhcp_range_start | default(vlan4_ip | regex_replace('\\.\\d+$', '.50')) }} - {{ vlan4_dhcp_range_end | default(vlan4_ip | regex_replace('\\.\\d+$', '.150')) }}{% endif %}
-          {% if vlan5_ip is defined %}- VLAN 5 ({{ vlan5_ip | regex_replace('\\.\\d+$', '.0') }}/24): {{ vlan5_dhcp_range_start | default(vlan5_ip | regex_replace('\\.\\d+$', '.50')) }} - {{ vlan5_dhcp_range_end | default(vlan5_ip | regex_replace('\\.\\d+$', '.150')) }}{% endif %}
+          DHCP Ranges (All VLANs):
+          - VLAN 2 - Main Network ({{ vlan2_ip | regex_replace('\\.\\d+$', '.0') }}/24): {{ vlan2_dhcp_range_start | default(vlan2_ip | regex_replace('\\.\\d+$', '.50')) }} - {{ vlan2_dhcp_range_end | default(vlan2_ip | regex_replace('\\.\\d+$', '.150')) }}
+          {% if vlan3_ip is defined %}- VLAN 3 - Private ({{ vlan3_ip | regex_replace('\\.\\d+$', '.0') }}/24): {{ vlan3_dhcp_range_start | default(vlan3_ip | regex_replace('\\.\\d+$', '.50')) }} - {{ vlan3_dhcp_range_end | default(vlan3_ip | regex_replace('\\.\\d+$', '.150')) }}{% endif %}
+          {% if vlan4_ip is defined %}- VLAN 4 - Home Assistant ({{ vlan4_ip | regex_replace('\\.\\d+$', '.0') }}/24): {{ vlan4_dhcp_range_start | default(vlan4_ip | regex_replace('\\.\\d+$', '.50')) }} - {{ vlan4_dhcp_range_end | default(vlan4_ip | regex_replace('\\.\\d+$', '.150')) }}{% endif %}
+          {% if vlan5_ip is defined %}- VLAN 5 - Guest ({{ vlan5_ip | regex_replace('\\.\\d+$', '.0') }}/24): {{ vlan5_dhcp_range_start | default(vlan5_ip | regex_replace('\\.\\d+$', '.50')) }} - {{ vlan5_dhcp_range_end | default(vlan5_ip | regex_replace('\\.\\d+$', '.150')) }}{% endif %}
+          
+          Managing DHCP Reservations:
+          Reservations are embedded directly in the Kea configuration (Kea 2.2.6).
+          
+          Create YAML files in the playbook directory for each VLAN:
+          - reservations_vlan2.yml
+          - reservations_vlan3.yml
+          - reservations_vlan4.yml
+          - reservations_vlan5.yml
+          
+          Example format for reservation files:
+          ---
+          reservations:
+            - mac: "aa:bb:cc:dd:ee:ff"
+              ip: "192.168.2.100"
+              hostname: "mydevice"
+            - mac: "11:22:33:44:55:66"
+              ip: "192.168.2.101"
+              hostname: "printer"
+          
+          After editing the YAML files, re-run this playbook to update the router.
+          The playbook will automatically embed reservations in the Kea configuration file.
+          
+          Kea Control Agent (optional):
+          - To enable REST API: systemctl enable kea-ctrl-agent
+          - To start REST API: systemctl start kea-ctrl-agent
       tags: documentation
       
   handlers:
-    - name: restart dhcpd
+    - name: restart kea-dhcp4
       ansible.builtin.systemd:
-        name: isc-dhcp-server
+        name: kea-dhcp4-server
         state: restarted
+        
+    - name: reload systemd and restart kea-dhcp4
+      ansible.builtin.systemd:
+        daemon_reload: yes
+      notify: restart kea-dhcp4
 

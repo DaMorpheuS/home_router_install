@@ -1,6 +1,6 @@
 ---
 - name: Check network interfaces
-  hosts: router
+  hosts: routers
   become: yes
   gather_facts: yes
   

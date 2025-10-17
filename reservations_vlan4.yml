@@ -1,0 +1,22 @@
+---
+# DHCP Reservations for VLAN 4 (Home Assistant Network)
+# 
+# Add your static DHCP reservations here.
+# Each reservation needs a MAC address, IP address, and hostname.
+#
+# Example:
+# reservations:
+#   - mac: "aa:bb:cc:dd:ee:ff"
+#     ip: "192.168.4.100"
+#     hostname: "home-assistant"
+#   
+#   - mac: "11:22:33:44:55:66"
+#     ip: "192.168.4.101"
+#     hostname: "smart-switch"
+#   
+#   - mac: "ab:cd:ef:12:34:56"
+#     ip: "192.168.4.102"
+#     hostname: "zigbee-coordinator"
+
+reservations: []
+

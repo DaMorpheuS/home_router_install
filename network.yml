@@ -1,49 +1,53 @@
 ---
 - name: Configure network settings for router
-  hosts: router
+  hosts: routers
   become: yes
   
-  vars:
-    # Primary network interface configuration
-    # Override these in inventory.ini or group_vars/host_vars
-    # Defaults are set here if not defined elsewhere
-    local_network: 192.168.2.0
-    local_broadcast: 192.168.2.255
-    local_gateway: 192.168.2.1  # Optional, set if needed
-    
   tasks:
     - name: Gather distribution facts
       ansible.builtin.setup:
         gather_subset:
           - distribution
       tags: always
+    
+    - name: Check if required network utilities are installed
+      ansible.builtin.command: dpkg -l systemd iproute2 net-tools ethtool
+      register: network_packages_check
+      changed_when: false
+      failed_when: network_packages_check.rc != 0
+      tags: packages
       
-    - name: Set default values for network configuration
-      ansible.builtin.set_fact:
-        local_interface: "{{ local_interface | default('eth0') }}"
-        local_ip: "{{ local_ip | default('192.168.2.2') }}"
-        local_netmask: "{{ local_netmask | default('255.255.255.0') }}"
-      tags: always
-    
-    - name: Install network utilities (Trixie)
-      ansible.builtin.command: apt-get install -y ifupdown iproute2 net-tools ethtool vlan
+    - name: Disable old networking service (if exists)
+      ansible.builtin.systemd:
+        name: networking
+        enabled: no
+        state: stopped
       tags: packages
-      register: trixie_net_package_install
-      changed_when: "'0 upgraded, 0 newly installed' not in trixie_net_package_install.stdout"
-      when: ansible_distribution == "Debian" and ansible_distribution_release == "trixie"
-    
-    - name: Install network utilities (non-Trixie)
-      ansible.builtin.apt:
-        name:
-          - ifupdown
-          - iproute2
-          - net-tools
-          - ethtool
-          - vlan
-        state: present
-        update_cache: yes
+      ignore_errors: yes
+      
+    - name: Enable systemd-networkd
+      ansible.builtin.systemd:
+        name: systemd-networkd
+        enabled: yes
+        state: started
       tags: packages
-      when: ansible_distribution != "Debian" or ansible_distribution_release != "trixie"
+      
+    - name: Enable systemd-networkd-wait-online service
+      ansible.builtin.systemd:
+        name: systemd-networkd-wait-online
+        enabled: yes
+      tags: packages
+      
+    - name: Configure global IPv4 forwarding in networkd.conf
+      ansible.builtin.ini_file:
+        path: /etc/systemd/networkd.conf
+        section: Network
+        option: IPv4Forwarding
+        value: 'true'
+        create: yes
+        mode: '0644'
+      notify: restart networkd
+      tags: packages
       
     - name: Load 8021q kernel module for VLAN support
       ansible.builtin.modprobe:
@@ -70,87 +74,165 @@
         msg: "Available interfaces: {{ ansible_interfaces }}"
       tags: facts
       
-    - name: Backup current network interfaces configuration
+    - name: Create systemd-networkd directory
+      ansible.builtin.file:
+        path: /etc/systemd/network
+        state: directory
+        mode: '0755'
+      tags: configure
+      
+    - name: Configure physical interface ({{ physical_interface }})
       ansible.builtin.copy:
-        src: /etc/network/interfaces
-        dest: /etc/network/interfaces.backup.{{ ansible_date_time.epoch }}
-        remote_src: yes
+        dest: /etc/systemd/network/10-{{ physical_interface }}.network
+        content: |
+          [Match]
+          Name={{ physical_interface }}
+          
+          [Link]
+          RequiredForOnline=no
+          
+          [Network]
+          VLAN={{ vlan2_interface }}
+          {% if vlan3_interface is defined %}VLAN={{ vlan3_interface }}{% endif %}
+          
+          {% if vlan4_interface is defined %}VLAN={{ vlan4_interface }}{% endif %}
+          
+          {% if vlan5_interface is defined %}VLAN={{ vlan5_interface }}{% endif %}
+          
+          IPv4Forwarding=yes
         mode: '0644'
-      tags: backup
-      
-    - name: Remove any existing DHCP configuration for {{ local_interface }}
-      ansible.builtin.lineinfile:
-        path: /etc/network/interfaces
-        regexp: '^iface\s+{{ local_interface }}\s+inet\s+dhcp'
-        state: absent
+      notify: restart networkd
       tags: configure
       
-    - name: Configure static IP for {{ local_interface }}
-      ansible.builtin.blockinfile:
-        path: /etc/network/interfaces
-        block: |
-          # Primary network interface - Configured by Ansible
-          auto {{ local_interface }}
-          iface {{ local_interface }} inet static
-              address {{ local_ip }}
-              netmask {{ local_netmask }}
-              network {{ local_network }}
-              broadcast {{ local_broadcast }}
-              # gateway {{ local_gateway }}  # Uncomment if you need a gateway
-        marker: "# {mark} ANSIBLE MANAGED BLOCK - {{ local_interface }}"
-        create: yes
+    - name: Configure VLAN 2 interface (Main Network)
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/20-{{ vlan2_interface }}.netdev
+        content: |
+          [NetDev]
+          Name={{ vlan2_interface }}
+          Kind=vlan
+          
+          [VLAN]
+          Id=2
         mode: '0644'
-      notify: restart networking
+      notify: restart networkd
       tags: configure
+      when: vlan2_interface is defined
       
-    - name: Configure VLAN 3 interface
-      ansible.builtin.blockinfile:
-        path: /etc/network/interfaces
-        block: |
-          # VLAN 3 interface - Configured by Ansible
-          auto {{ vlan3_interface }}
-          iface {{ vlan3_interface }} inet static
-              address {{ vlan3_ip }}
-              netmask {{ vlan3_netmask }}
-              vlan-raw-device {{ local_interface }}
-        marker: "# {mark} ANSIBLE MANAGED BLOCK - VLAN3"
-        create: yes
+    - name: Configure VLAN 2 network
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/20-{{ vlan2_interface }}.network
+        content: |
+          [Match]
+          Name={{ vlan2_interface }}
+          
+          [Network]
+          Address={{ vlan2_ip }}/24
+          IPv4Forwarding=yes
+          
+          [Link]
+          RequiredForOnline=yes
         mode: '0644'
-      notify: restart networking
+      notify: restart networkd
+      tags: configure
+      when: vlan2_interface is defined and vlan2_ip is defined
+      
+    - name: Configure VLAN 3 netdev
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/30-{{ vlan3_interface }}.netdev
+        content: |
+          [NetDev]
+          Name={{ vlan3_interface }}
+          Kind=vlan
+          
+          [VLAN]
+          Id=3
+        mode: '0644'
+      notify: restart networkd
+      tags: configure
+      when: vlan3_interface is defined
+      
+    - name: Configure VLAN 3 network
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/30-{{ vlan3_interface }}.network
+        content: |
+          [Match]
+          Name={{ vlan3_interface }}
+          
+          [Network]
+          Address={{ vlan3_ip }}/24
+          IPv4Forwarding=yes
+          
+          [Link]
+          RequiredForOnline=carrier
+        mode: '0644'
+      notify: restart networkd
       tags: configure
       when: vlan3_interface is defined and vlan3_ip is defined
       
-    - name: Configure VLAN 4 interface
-      ansible.builtin.blockinfile:
-        path: /etc/network/interfaces
-        block: |
-          # VLAN 4 interface - Configured by Ansible
-          auto {{ vlan4_interface }}
-          iface {{ vlan4_interface }} inet static
-              address {{ vlan4_ip }}
-              netmask {{ vlan4_netmask }}
-              vlan-raw-device {{ local_interface }}
-        marker: "# {mark} ANSIBLE MANAGED BLOCK - VLAN4"
-        create: yes
+    - name: Configure VLAN 4 netdev
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/40-{{ vlan4_interface }}.netdev
+        content: |
+          [NetDev]
+          Name={{ vlan4_interface }}
+          Kind=vlan
+          
+          [VLAN]
+          Id=4
         mode: '0644'
-      notify: restart networking
+      notify: restart networkd
+      tags: configure
+      when: vlan4_interface is defined
+      
+    - name: Configure VLAN 4 network
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/40-{{ vlan4_interface }}.network
+        content: |
+          [Match]
+          Name={{ vlan4_interface }}
+          
+          [Network]
+          Address={{ vlan4_ip }}/24
+          IPv4Forwarding=yes
+          
+          [Link]
+          RequiredForOnline=carrier
+        mode: '0644'
+      notify: restart networkd
       tags: configure
       when: vlan4_interface is defined and vlan4_ip is defined
       
-    - name: Configure VLAN 5 interface
-      ansible.builtin.blockinfile:
-        path: /etc/network/interfaces
-        block: |
-          # VLAN 5 interface - Configured by Ansible
-          auto {{ vlan5_interface }}
-          iface {{ vlan5_interface }} inet static
-              address {{ vlan5_ip }}
-              netmask {{ vlan5_netmask }}
-              vlan-raw-device {{ local_interface }}
-        marker: "# {mark} ANSIBLE MANAGED BLOCK - VLAN5"
-        create: yes
+    - name: Configure VLAN 5 netdev
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/50-{{ vlan5_interface }}.netdev
+        content: |
+          [NetDev]
+          Name={{ vlan5_interface }}
+          Kind=vlan
+          
+          [VLAN]
+          Id=5
         mode: '0644'
-      notify: restart networking
+      notify: restart networkd
+      tags: configure
+      when: vlan5_interface is defined
+      
+    - name: Configure VLAN 5 network
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/50-{{ vlan5_interface }}.network
+        content: |
+          [Match]
+          Name={{ vlan5_interface }}
+          
+          [Network]
+          Address={{ vlan5_ip }}/24
+          IPv4Forwarding=yes
+          
+          [Link]
+          RequiredForOnline=carrier
+        mode: '0644'
+      notify: restart networkd
       tags: configure
       when: vlan5_interface is defined and vlan5_ip is defined
       
@@ -178,17 +260,31 @@
         - ipv6
       when: false  # Set to true if you want to disable IPv6
       
-    - name: Check if interface exists
-      ansible.builtin.command: ip link show {{ local_interface }}
-      register: interface_check
+    - name: Check if physical interface exists
+      ansible.builtin.command: ip link show {{ physical_interface }}
+      register: physical_check
       ignore_errors: yes
       changed_when: false
       tags: validate
       
-    - name: Display interface status
+    - name: Display physical interface status
       ansible.builtin.debug:
-        msg: "Interface {{ local_interface }} status: {{ 'EXISTS' if interface_check.rc == 0 else 'NOT FOUND' }}"
+        msg: "Physical interface {{ physical_interface }} status: {{ 'EXISTS' if physical_check.rc == 0 else 'NOT FOUND' }}"
       tags: validate
+      
+    - name: Check if VLAN 2 interface exists
+      ansible.builtin.command: ip link show {{ vlan2_interface }}
+      register: vlan2_check
+      ignore_errors: yes
+      changed_when: false
+      tags: validate
+      when: vlan2_interface is defined
+      
+    - name: Display VLAN 2 status
+      ansible.builtin.debug:
+        msg: "VLAN 2 interface {{ vlan2_interface }} status: {{ 'EXISTS' if vlan2_check.rc == 0 else 'NOT FOUND' }}"
+      tags: validate
+      when: vlan2_interface is defined
       
     - name: Check if VLAN 3 interface exists
       ansible.builtin.command: ip link show {{ vlan3_interface }}
@@ -233,10 +329,9 @@
       when: vlan5_interface is defined
       
   handlers:
-    - name: restart networking
+    - name: restart networkd
       ansible.builtin.systemd:
-        name: networking
+        name: systemd-networkd
         state: restarted
-      # Note: This will temporarily disconnect the SSH session
-      # Consider using async/poll or manual reboot
+      # Note: This may temporarily affect network connectivity
 

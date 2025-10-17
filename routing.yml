@@ -1,15 +1,15 @@
 ---
 - name: Configure routing and firewall rules for router using nftables
-  hosts: router
+  hosts: routers
   become: yes
   
   vars:
     # WAN interface - for internet access
     wan_interface: ppp0
     
-    # Network definitions
-    main_network: 192.168.2.0/24
-    main_interface: enp3s0
+    # Network definitions (all VLANs, no untagged)
+    vlan2_network: 192.168.2.0/24
+    vlan2_interface: enp3s0.2
     
     vlan3_network: 192.168.3.0/24
     vlan3_interface: enp3s0.3
@@ -27,21 +27,12 @@
           - distribution
       tags: always
       
-    - name: Install nftables (Trixie)
-      ansible.builtin.command: apt-get install -y nftables
+    - name: Check if nftables is installed
+      ansible.builtin.command: dpkg -l nftables
+      register: nftables_packages_check
+      changed_when: false
+      failed_when: nftables_packages_check.rc != 0
       tags: packages
-      register: trixie_nftables_install
-      changed_when: "'0 upgraded, 0 newly installed' not in trixie_nftables_install.stdout"
-      when: ansible_distribution == "Debian" and ansible_distribution_release == "trixie"
-      
-    - name: Install nftables (non-Trixie)
-      ansible.builtin.apt:
-        name:
-          - nftables
-        state: present
-        update_cache: yes
-      tags: packages
-      when: ansible_distribution != "Debian" or ansible_distribution_release != "trixie"
     
     - name: Ensure IP forwarding is enabled
       ansible.posix.sysctl:
@@ -51,6 +42,76 @@
         state: present
         reload: yes
       tags: routing
+      
+    - name: Load nf_conntrack module for connection tracking
+      ansible.builtin.modprobe:
+        name: nf_conntrack
+        state: present
+      tags: routing
+      
+    - name: Ensure nf_conntrack module loads on boot
+      ansible.builtin.lineinfile:
+        path: /etc/modules
+        line: "nf_conntrack"
+        create: yes
+        mode: '0644'
+      tags: routing
+      
+    - name: Enable conntrack helpers
+      ansible.posix.sysctl:
+        name: "{{ item }}"
+        value: '1'
+        sysctl_set: yes
+        state: present
+        reload: yes
+      loop:
+        - net.netfilter.nf_conntrack_helper
+      tags: routing
+      ignore_errors: yes  # Some kernels may not have this parameter
+      
+      
+    - name: Create systemd override directory for nftables
+      ansible.builtin.file:
+        path: /etc/systemd/system/nftables.service.d
+        state: directory
+        mode: '0755'
+      tags: firewall
+      
+    - name: Create nftables service override to wait for network
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/nftables.service.d/override.conf
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=nftables firewall service
+          # Disable default dependencies to avoid ordering cycles
+          DefaultDependencies=no
+          # Clear default Before=network-pre.target
+          Before=
+          After=
+          # Start after basic system is ready
+          After=sysinit.target local-fs.target
+          # Wait for network interfaces (but don't create ordering cycle)
+          Wants=systemd-networkd.service ppp@kpn.service
+          
+          [Service]
+          # Restart nftables if it fails (e.g. due to missing interfaces)
+          Restart=on-failure
+          RestartSec=5s
+      tags: firewall
+      notify: reload systemd
+      
+    - name: Reload systemd daemon to recognize nftables override
+      ansible.builtin.systemd:
+        daemon_reload: yes
+      tags: firewall
+      
+    - name: Remove old UniFi nftables include file (no longer used)
+      ansible.builtin.file:
+        path: /etc/nftables.d/unifi.nft
+        state: absent
+      tags: firewall
+      ignore_errors: yes
       
     - name: Create nftables configuration
       ansible.builtin.copy:
@@ -65,17 +126,27 @@
           flush ruleset
           
           # Define variables for networks and interfaces
-          define MAIN_NET = {{ main_network }}
+          define VLAN2_NET = {{ vlan2_network }}
           define VLAN3_NET = {{ vlan3_network }}
           define VLAN4_NET = {{ vlan4_network }}
           define VLAN5_NET = {{ vlan5_network }}
+          
+          # Define gateway IPs (router IPs on each VLAN)
+          define VLAN2_GW = {{ vlan2_ip }}
+          define VLAN3_GW = {{ vlan3_ip }}
+          define VLAN4_GW = {{ vlan4_ip }}
+          define VLAN5_GW = {{ vlan5_ip }}
+          
+          # IPsec VPN remote networks
+          define IPSEC_KOOPMANS_NET = 192.168.100.0/24
+          define IPSEC_DOUBLEME_NET = 192.168.20.0/24
           
           # Main table for filtering and NAT
           table inet filter {
               
               # INPUT chain - traffic destined for the router itself
               chain input {
-                  type filter hook input priority filter; policy accept;
+                  type filter hook input priority filter; policy drop;
                   
                   # Allow loopback
                   iif lo accept
@@ -83,69 +154,117 @@
                   # Allow established and related connections
                   ct state established,related accept
                   
-                  # Allow ICMP (ping) from local networks
-                  ip saddr { $MAIN_NET, $VLAN3_NET, $VLAN4_NET, $VLAN5_NET } icmp type echo-request accept
+                  # Drop invalid packets
+                  ct state invalid drop
                   
-                  # Allow SSH from all local networks (for management)
-                  ip saddr { $MAIN_NET, $VLAN3_NET, $VLAN4_NET, $VLAN5_NET } tcp dport 22 accept
+                  # === SECURITY: Block ALL management from WAN/Internet ===
+                  iifname "{{ wan_interface }}" tcp dport 22 drop
+                  iifname "{{ wan_interface }}" tcp dport 23 drop
+                  iifname "{{ wan_interface }}" tcp dport 80 drop
+                  iifname "{{ wan_interface }}" tcp dport 443 drop
+                  iifname "{{ wan_interface }}" tcp dport 8080 drop
+                  iifname "{{ wan_interface }}" udp dport 161 drop
+                  iifname "{{ wan_interface }}" tcp dport 8443 drop comment "Block UniFi Web Interface from WAN"
+                  iifname "{{ wan_interface }}" tcp dport { 8880, 8843 } drop comment "Block UniFi Guest Portal from WAN"
+                  iifname "{{ wan_interface }}" udp dport { 3478, 10001, 1900 } drop comment "Block UniFi discovery from WAN"
                   
-                  # Allow DNS from local networks
-                  ip saddr { $MAIN_NET, $VLAN3_NET, $VLAN4_NET, $VLAN5_NET } udp dport 53 accept
-                  ip saddr { $MAIN_NET, $VLAN3_NET, $VLAN4_NET, $VLAN5_NET } tcp dport 53 accept
+                  # === VLAN 2 (Main Network) - Full access to router on all interfaces ===
+                  ip saddr $VLAN2_NET icmp type echo-request accept
+                  ip saddr $VLAN2_NET tcp dport 22 accept
+                  ip saddr $VLAN2_NET udp dport 53 accept
+                  ip saddr $VLAN2_NET tcp dport 53 accept
+                  ip saddr $VLAN2_NET udp dport { 67, 68 } accept
                   
-                  # Allow DHCP from local networks
-                  udp dport { 67, 68 } accept
+                  # === UniFi Controller Access Rules ===
+                  # Web interface (HTTPS) - VLAN 2 only
+                  ip saddr $VLAN2_NET tcp dport 8443 accept comment "UniFi Controller Web Interface"
                   
-                  # Log other input (optional, for debugging)
-                  # log prefix "INPUT-dropped: "
+                  # Device communication - all VLANs (APs need to communicate)
+                  tcp dport 8080 accept comment "UniFi Device Inform"
+                  
+                  # STUN - all VLANs (for AP communication)
+                  udp dport 3478 accept comment "UniFi STUN"
+                  
+                  # Guest portal - VLAN 2 only for management
+                  ip saddr $VLAN2_NET tcp dport 8880 accept comment "UniFi Guest Portal HTTP"
+                  ip saddr $VLAN2_NET tcp dport 8843 accept comment "UniFi Guest Portal HTTPS"
+                  
+                  # Device discovery - all VLANs (for AP discovery)
+                  udp dport 10001 accept comment "UniFi Discovery"
+                  
+                  # AP EDU broadcasting - all VLANs
+                  udp dport 1900 accept comment "UniFi AP EDU"
+                  
+                  # === VLAN 3 - Access ONLY to its own gateway IP (192.168.3.1) ===
+                  ip saddr $VLAN3_NET ip daddr $VLAN3_GW icmp type echo-request accept
+                  ip saddr $VLAN3_NET ip daddr $VLAN3_GW tcp dport 22 accept
+                  ip saddr $VLAN3_NET ip daddr $VLAN3_GW udp dport 53 accept
+                  ip saddr $VLAN3_NET ip daddr $VLAN3_GW tcp dport 53 accept
+                  ip saddr $VLAN3_NET ip daddr $VLAN3_GW udp dport { 67, 68 } accept
+                  
+                  # === VLAN 4 - Access ONLY to its own gateway IP (192.168.4.1) ===
+                  ip saddr $VLAN4_NET ip daddr $VLAN4_GW icmp type echo-request accept
+                  ip saddr $VLAN4_NET ip daddr $VLAN4_GW tcp dport 22 accept
+                  ip saddr $VLAN4_NET ip daddr $VLAN4_GW udp dport 53 accept
+                  ip saddr $VLAN4_NET ip daddr $VLAN4_GW tcp dport 53 accept
+                  ip saddr $VLAN4_NET ip daddr $VLAN4_GW udp dport { 67, 68 } accept
+                  
+                  # === VLAN 5 (Guest) - Access ONLY to its own gateway IP (192.168.5.1) ===
+                  ip saddr $VLAN5_NET ip daddr $VLAN5_GW icmp type echo-request accept
+                  ip saddr $VLAN5_NET ip daddr $VLAN5_GW tcp dport 22 accept
+                  ip saddr $VLAN5_NET ip daddr $VLAN5_GW udp dport 53 accept
+                  ip saddr $VLAN5_NET ip daddr $VLAN5_GW tcp dport 53 accept
+                  ip saddr $VLAN5_NET ip daddr $VLAN5_GW udp dport { 67, 68 } accept
+                  
+                  # Log dropped packets (optional, for debugging)
+                  # log prefix "INPUT-dropped: " 
+                  
+                  # Default policy is drop (set above)
               }
               
               # FORWARD chain - traffic passing through the router
               chain forward {
                   type filter hook forward priority filter; policy drop;
                   
-                  # Allow established and related connections
+                  # Allow established and related connections (for return traffic)
                   ct state established,related accept
                   
-                # === Main Network (192.168.2.0/24) - Full Access ===
-                # Main network can access VLAN 3
-                ip saddr $MAIN_NET ip daddr $VLAN3_NET accept
+                  # Drop invalid packets
+                  ct state invalid drop
+                  
+                # === VLAN 2 (192.168.2.0/24) - Main Network - Full Access ===
+                # VLAN 2 can access VLAN 3 (bidirectional)
+                ip saddr $VLAN2_NET ip daddr $VLAN3_NET accept
                 
-                # Main network can access VLAN 4
-                ip saddr $MAIN_NET ip daddr $VLAN4_NET accept
+                # VLAN 2 can access VLAN 4 (bidirectional)
+                ip saddr $VLAN2_NET ip daddr $VLAN4_NET accept
                 
-                # Main network can access VLAN 5 (guest network)
-                ip saddr $MAIN_NET ip daddr $VLAN5_NET accept
+                # VLAN 2 can access IPsec VPN remote networks
+                ip saddr $VLAN2_NET ip daddr $IPSEC_KOOPMANS_NET accept
+                ip saddr $VLAN2_NET ip daddr $IPSEC_DOUBLEME_NET accept
                 
-                # Main network can access internet
-                ip saddr $MAIN_NET oifname "{{ wan_interface }}" accept
+                # IPsec Koopmans network can access specific devices in VLAN 2
+                ip saddr $IPSEC_KOOPMANS_NET ip daddr { 192.168.2.50, 192.168.2.51, 192.168.2.60, 192.168.2.61 } accept
+                
+                # VLAN 2 can access internet
+                ip saddr $VLAN2_NET oifname "{{ wan_interface }}" accept
                 
                 # === VLAN 3 (192.168.3.0/24) - Isolated + Internet ===
                 # VLAN 3 can access internet
                 ip saddr $VLAN3_NET oifname "{{ wan_interface }}" accept
-                
-                # VLAN 3 can reach main network (for responses)
-                ip saddr $VLAN3_NET ip daddr $MAIN_NET accept
-                
-                # Block VLAN 3 to VLAN 4
-                ip saddr $VLAN3_NET ip daddr $VLAN4_NET drop
+
                 
                 # === VLAN 4 (192.168.4.0/24) - Isolated + Internet ===
                 # VLAN 4 can access internet
                 ip saddr $VLAN4_NET oifname "{{ wan_interface }}" accept
-                
-                # VLAN 4 can reach main network (for responses)
-                ip saddr $VLAN4_NET ip daddr $MAIN_NET accept
-                
-                # Block VLAN 4 to VLAN 3
-                ip saddr $VLAN4_NET ip daddr $VLAN3_NET drop
+               
                 
                 # === VLAN 5 (192.168.5.0/24) - Guest Network - Internet Only ===
                 # VLAN 5 can ONLY access internet (no access to any local networks)
                 ip saddr $VLAN5_NET oifname "{{ wan_interface }}" accept
                 
                 # Block VLAN 5 from all local networks
-                ip saddr $VLAN5_NET ip daddr $MAIN_NET drop
+                ip saddr $VLAN5_NET ip daddr $VLAN2_NET drop
                 ip saddr $VLAN5_NET ip daddr $VLAN3_NET drop
                 ip saddr $VLAN5_NET ip daddr $VLAN4_NET drop
                   
@@ -166,13 +285,30 @@
               chain postrouting {
                   type nat hook postrouting priority srcnat; policy accept;
                   
-                  # Masquerade all local networks going to internet
-                  ip saddr $MAIN_NET oifname "{{ wan_interface }}" masquerade
+                  # Masquerade all VLAN networks going to internet (but NOT IPsec traffic)
+                  ip saddr $VLAN2_NET ip daddr $IPSEC_KOOPMANS_NET accept
+                  ip saddr $VLAN2_NET ip daddr $IPSEC_DOUBLEME_NET accept
+                  ip saddr $VLAN2_NET oifname "{{ wan_interface }}" masquerade
                   ip saddr $VLAN3_NET oifname "{{ wan_interface }}" masquerade
                   ip saddr $VLAN4_NET oifname "{{ wan_interface }}" masquerade
                   ip saddr $VLAN5_NET oifname "{{ wan_interface }}" masquerade
               }
           }
+      tags: firewall
+      
+    - name: Check if ppp0 interface is up
+      ansible.builtin.command: ip link show ppp0
+      register: ppp0_status
+      until: ppp0_status.rc == 0
+      retries: 30
+      delay: 1
+      ignore_errors: yes
+      changed_when: false
+      tags: firewall
+      
+    - name: Display ppp0 interface status
+      ansible.builtin.debug:
+        msg: "ppp0 interface status: {{ 'UP' if ppp0_status.rc == 0 else 'DOWN - Firewall may not work correctly!' }}"
       tags: firewall
       
     - name: Flush existing nftables rules
@@ -211,6 +347,31 @@
         var: nft_rules.stdout_lines
       tags: validate
       
+    - name: Check if conntrack module is loaded
+      ansible.builtin.command: lsmod | grep nf_conntrack
+      register: conntrack_check
+      changed_when: false
+      ignore_errors: yes
+      tags: validate
+      
+    - name: Display conntrack status
+      ansible.builtin.debug:
+        msg: "Connection tracking module: {{ 'LOADED' if conntrack_check.rc == 0 else 'NOT LOADED - THIS WILL CAUSE ISSUES!' }}"
+      tags: validate
+      
+    - name: Show current conntrack entries (sample)
+      ansible.builtin.command: conntrack -L
+      register: conntrack_entries
+      changed_when: false
+      ignore_errors: yes
+      tags: validate
+      
+    - name: Display conntrack info
+      ansible.builtin.debug:
+        msg: |
+          Connection tracking is {{ 'working' if conntrack_entries.rc == 0 else 'NOT working - install conntrack-tools package' }}
+      tags: validate
+      
     - name: Create routing information file
       ansible.builtin.copy:
         dest: /etc/router-info.txt
@@ -219,8 +380,8 @@
           Home Router Configuration
           =========================
           
-          Network Layout:
-          - Main Network:  {{ main_network }} ({{ main_interface }})
+          Network Layout (All VLANs - No Untagged):
+          - VLAN 2:        {{ vlan2_network }} ({{ vlan2_interface }}) - Main Network
           - VLAN 3:        {{ vlan3_network }} ({{ vlan3_interface }}) - Private Network
           - VLAN 4:        {{ vlan4_network }} ({{ vlan4_interface }}) - Home Assistant
           - VLAN 5:        {{ vlan5_network }} ({{ vlan5_interface }}) - Guest Network
@@ -228,11 +389,28 @@
           
           Routing Rules (nftables):
           1. All networks have internet access through {{ wan_interface }}
-          2. Main network ({{ main_network }}) can access all VLANs
-          3. VLAN 3 ({{ vlan3_network }}) is isolated - only internet and main network
-          4. VLAN 4 ({{ vlan4_network }}) is isolated - only internet and main network
+          2. VLAN 2 ({{ vlan2_network }}) - Main network - can access all VLANs
+          3. VLAN 3 ({{ vlan3_network }}) is isolated - only internet and VLAN 2
+          4. VLAN 4 ({{ vlan4_network }}) is isolated - only internet and VLAN 2
           5. VLAN 5 ({{ vlan5_network }}) is GUEST - ONLY internet access (fully isolated)
           6. VLAN 3 and VLAN 4 cannot communicate with each other
+          
+          Security Features:
+          - SSH/Telnet blocked from WAN ({{ wan_interface }})
+          - HTTP/HTTPS blocked from WAN
+          - SNMP blocked from WAN
+          - UniFi Controller web interface blocked from WAN
+          - Each VLAN can only access its own gateway IP
+          - Management only available from local networks
+          - Default policy: DROP (deny all unless explicitly allowed)
+          
+          UniFi Controller Ports (if installed):
+          - 8443 (TCP) - Web Interface - VLAN 2 only, blocked from WAN
+          - 8080 (TCP) - Device Inform - All VLANs, blocked from WAN
+          - 3478 (UDP) - STUN - All VLANs, blocked from WAN
+          - 8880/8843 (TCP) - Guest Portal - VLAN 2 only, blocked from WAN
+          - 10001 (UDP) - Discovery - All VLANs, blocked from WAN
+          - 1900 (UDP) - AP EDU - All VLANs, blocked from WAN
           
           Management Commands:
           - View all rules:          nft list ruleset
@@ -247,13 +425,24 @@
           Configuration file: /etc/nftables.conf
       tags: documentation
       
+    - name: Test routing from VLAN 2 (optional)
+      ansible.builtin.debug:
+        msg: |
+          To test VLAN 2 (Main Network), from a device on VLAN 2:
+          - ping 192.168.2.2 (gateway) - should work
+          - ping 8.8.8.8 (internet) - should work
+          - ping 192.168.3.x (VLAN 3) - should work
+          - ping 192.168.4.x (VLAN 4) - should work
+          - ping 192.168.5.x (VLAN 5) - should work
+      tags: testing
+      
     - name: Test routing from VLAN 3 (optional)
       ansible.builtin.debug:
         msg: |
           To test VLAN 3 isolation, from a device on VLAN 3:
           - ping 192.168.3.1 (gateway) - should work
           - ping 8.8.8.8 (internet) - should work
-          - ping 192.168.2.x (main network) - should work
+          - ping 192.168.2.x (VLAN 2 - main network) - should work
           - ping 192.168.4.x (VLAN 4) - should FAIL
       tags: testing
       
@@ -263,7 +452,7 @@
           To test VLAN 4 isolation, from a device on VLAN 4:
           - ping 192.168.4.1 (gateway) - should work
           - ping 8.8.8.8 (internet) - should work
-          - ping 192.168.2.x (main network) - should work
+          - ping 192.168.2.x (VLAN 2 - main network) - should work
           - ping 192.168.3.x (VLAN 3) - should FAIL
       tags: testing
       
@@ -273,8 +462,13 @@
           To test VLAN 5 (Guest Network) isolation, from a device on VLAN 5:
           - ping 192.168.5.1 (gateway) - should work
           - ping 8.8.8.8 (internet) - should work
-          - ping 192.168.2.x (main network) - should FAIL
+          - ping 192.168.2.x (VLAN 2 - main network) - should FAIL
           - ping 192.168.3.x (VLAN 3) - should FAIL
           - ping 192.168.4.x (VLAN 4) - should FAIL
           Guest network is fully isolated - internet access only!
       tags: testing
+      
+  handlers:
+    - name: reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: yes

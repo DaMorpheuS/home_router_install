@@ -1,0 +1,194 @@
+---
+- name: Install Ubiquiti UniFi Controller
+  hosts: routers
+  become: yes
+  
+  vars:
+    unifi_version: "8.6"  # Latest stable version
+    mongodb_version: "7.0"
+    
+  tasks:
+    - name: Gather distribution facts
+      ansible.builtin.setup:
+        gather_subset:
+          - distribution
+      tags: always
+      
+    - name: Install required dependencies
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - apt-transport-https
+          - gnupg
+          - curl
+        state: present
+        update_cache: yes
+      tags: dependencies
+      
+    - name: Create apt keyrings directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+      tags: mongodb
+      
+    - name: Download MongoDB GPG key
+      ansible.builtin.get_url:
+        url: https://www.mongodb.org/static/pgp/server-{{ mongodb_version }}.asc
+        dest: /etc/apt/keyrings/mongodb-server-{{ mongodb_version }}.asc
+        mode: '0644'
+      tags: mongodb
+      
+    - name: Determine MongoDB repository distribution
+      ansible.builtin.set_fact:
+        mongodb_dist: "{{ 'bookworm' if ansible_distribution_release == 'trixie' else ansible_distribution_release }}"
+      tags: mongodb
+      
+    - name: Add MongoDB repository
+      ansible.builtin.apt_repository:
+        repo: "deb [ arch=amd64,arm64 signed-by=/etc/apt/keyrings/mongodb-server-{{ mongodb_version }}.asc ] https://repo.mongodb.org/apt/debian {{ mongodb_dist }}/mongodb-org/{{ mongodb_version }} main"
+        state: present
+        filename: mongodb-org-{{ mongodb_version }}
+      tags: mongodb
+      
+    - name: Install MongoDB
+      ansible.builtin.apt:
+        name:
+          - mongodb-org
+        state: present
+        update_cache: yes
+      tags: mongodb
+      
+    - name: Ensure MongoDB service is enabled and started
+      ansible.builtin.systemd:
+        name: mongod
+        enabled: yes
+        state: started
+      tags: mongodb
+      
+    - name: Download Ubiquiti UniFi GPG key
+      ansible.builtin.get_url:
+        url: https://dl.ui.com/unifi/unifi-repo.gpg
+        dest: /etc/apt/keyrings/unifi-repo.gpg
+        mode: '0644'
+      tags: unifi
+      
+    - name: Add Ubiquiti UniFi repository
+      ansible.builtin.apt_repository:
+        repo: "deb [ arch=amd64,arm64 signed-by=/etc/apt/keyrings/unifi-repo.gpg ] https://www.ui.com/downloads/unifi/debian stable ubiquiti"
+        state: present
+        filename: 100-ubnt-unifi
+      tags: unifi
+      
+    - name: Update apt cache after adding UniFi repository
+      ansible.builtin.apt:
+        update_cache: yes
+      tags: unifi
+      
+    - name: Install UniFi Controller
+      ansible.builtin.apt:
+        name: unifi
+        state: present
+      tags: unifi
+      
+    - name: Ensure UniFi service is enabled and started
+      ansible.builtin.systemd:
+        name: unifi
+        enabled: yes
+        state: started
+      tags: unifi
+      
+    - name: Wait for UniFi Controller to start
+      ansible.builtin.wait_for:
+        port: 8443
+        delay: 10
+        timeout: 120
+        msg: "Timeout waiting for UniFi Controller to start"
+      tags: unifi
+      
+    - name: Check UniFi Controller status
+      ansible.builtin.command: systemctl status unifi
+      register: unifi_status
+      changed_when: false
+      ignore_errors: yes
+      tags: validate
+      
+    - name: Show UniFi Controller status
+      ansible.builtin.debug:
+        var: unifi_status.stdout_lines
+      tags: validate
+      
+    - name: Check MongoDB status
+      ansible.builtin.command: systemctl status mongod
+      register: mongodb_status
+      changed_when: false
+      ignore_errors: yes
+      tags: validate
+      
+    - name: Show MongoDB status
+      ansible.builtin.debug:
+        var: mongodb_status.stdout_lines
+      tags: validate
+      
+    - name: Display UniFi Controller information
+      ansible.builtin.debug:
+        msg: |
+          ========================================
+          UniFi Controller Installation Complete!
+          ========================================
+          
+          Access your UniFi Controller at:
+          https://{{ ansible_default_ipv4.address }}:8443
+          
+          Initial Setup:
+          1. Open https://{{ ansible_default_ipv4.address }}:8443 in your browser
+          2. Accept the self-signed certificate warning
+          3. Follow the setup wizard to create your admin account
+          4. Configure your UniFi network and adopt your access points
+          
+          Important Ports (Firewall Configuration):
+          - 8443 (TCP) - Web Interface (HTTPS) - RESTRICTED to VLAN 2 only
+          - 8080 (TCP) - Device Communication/Inform - All VLANs (APs need access)
+          - 3478 (UDP) - STUN - All VLANs (for AP communication)
+          - 8880 (TCP) - Guest Portal HTTP - RESTRICTED to VLAN 2 only
+          - 8843 (TCP) - Guest Portal HTTPS - RESTRICTED to VLAN 2 only
+          - 10001 (UDP) - Device Discovery - All VLANs (for AP discovery)
+          
+          Security Note:
+          - Web interface and guest portal are ONLY accessible from VLAN 2 ({{ vlan2_ip | regex_replace('\\.\\d+$', '.0') }}/24)
+          - Access Points on other VLANs can still communicate with the controller
+          - This prevents guests and IoT devices from accessing the controller interface
+          
+          Service Management:
+          - Check status: systemctl status unifi
+          - Restart: systemctl restart unifi
+          - View logs: journalctl -u unifi -f
+          - MongoDB status: systemctl status mongod
+          
+          Configuration Files:
+          - UniFi data: /var/lib/unifi
+          - UniFi logs: /var/log/unifi
+          - MongoDB data: /var/lib/mongodb
+          
+          Adopting Access Points:
+          1. Ensure APs are on same network/VLAN as controller
+          2. APs should auto-discover the controller
+          3. If not, SSH to AP and run: set-inform http://{{ ansible_default_ipv4.address }}:8080/inform
+          
+          Backup Recommendation:
+          - Regular backups of /var/lib/unifi directory
+          - MongoDB backups: mongodump --out /backup/mongodb/
+          
+          Network Configuration:
+          - Main VLAN 2: {{ vlan2_ip | default('192.168.2.1') }}/24
+          - Private VLAN 3: {{ vlan3_ip | default('192.168.3.1') }}/24
+          - IoT VLAN 4: {{ vlan4_ip | default('192.168.4.1') }}/24
+          - Guest VLAN 5: {{ vlan5_ip | default('192.168.5.1') }}/24
+          
+          Note: Configure your WiFi SSIDs to use the appropriate VLANs in the UniFi Controller
+          
+          Firewall Configuration:
+          - UniFi firewall rules are managed in routing.yml
+          - Run routing.yml playbook to update firewall rules for UniFi Controller
+      tags: documentation
+

@@ -139,6 +139,54 @@ plog
 
 **Note:** You'll need to set the PPP password in `/etc/ppp/pap-secrets` or `/etc/ppp/chap-secrets` manually if required by your ISP.
 
+### unifi_controller.yml - Ubiquiti UniFi Controller
+
+This playbook installs and configures the Ubiquiti UniFi Controller for managing WiFi access points:
+- Installs MongoDB (required dependency)
+- Adds Ubiquiti repository and GPG keys
+- Installs UniFi Controller software
+- Configures firewall rules for UniFi services
+- Provides web interface on port 8443
+
+**Run the playbook:**
+```bash
+ansible-playbook unifi_controller.yml
+```
+
+**Access the Controller:**
+- Web Interface: https://192.168.2.1:8443
+- Accept the self-signed certificate warning
+- Follow the setup wizard to create admin account
+
+**Important Ports:**
+- 8443 (TCP) - Web Interface (HTTPS) - **VLAN 2 only**
+- 8080 (TCP) - Device Communication/Inform - All VLANs
+- 3478 (UDP) - STUN for remote access - All VLANs
+- 8880 (TCP) - Guest Portal HTTP - **VLAN 2 only**
+- 8843 (TCP) - Guest Portal HTTPS - **VLAN 2 only**
+
+**Security:**
+- Web interface is restricted to VLAN 2 (192.168.2.0/24) for security
+- WiFi Access Points on any VLAN can still communicate with the controller
+- Prevents guests and IoT devices from accessing the management interface
+
+**Adopting Access Points:**
+1. Ensure APs are on same network as controller
+2. APs should auto-discover the controller
+3. If manual adoption needed, SSH to AP: `set-inform http://192.168.2.1:8080/inform`
+
+**Service Management:**
+```bash
+# Check status
+systemctl status unifi
+
+# Restart controller
+systemctl restart unifi
+
+# View logs
+journalctl -u unifi -f
+```
+
 ## Recommended Workflow
 
 For a fresh Debian installation, run playbooks in this order:
@@ -156,7 +204,10 @@ ansible-playbook network.yml
 # 4. Configure WAN PPPoE connection (KPN)
 ansible-playbook wan.yml
 
-# 5. After network changes, update inventory.ini to use the new IP (192.168.2.2)
+# 5. Install UniFi Controller for WiFi AP management (optional)
+ansible-playbook unifi_controller.yml
+
+# 6. After network changes, update inventory.ini to use the new IP (192.168.2.2)
 # Then start the PPPoE connection
 ssh rkaper@192.168.2.2
 sudo pon kpn
@@ -181,13 +232,19 @@ ansible-playbook common.yml -v
 - Make sure to secure SSH keys properly
 - Consider changing the default SSH port after initial setup
 
+## Additional Features
+
+The following playbooks are also available:
+- `routing.yml` - Configures routing and NAT
+- `dhcp_server.yml` - Kea DHCP server for all VLANs
+- `ipsec_tunnel.yml` - IPsec VPN tunnels using strongSwan
+- `unifi_controller.yml` - UniFi Controller for WiFi AP management
+
 ## Next Steps
 
 Consider adding more playbooks for:
-- Firewall rules (iptables/nftables) with NAT
-- DHCP server setup (dnsmasq/isc-dhcp-server)
 - DNS caching/resolver (unbound/dnsmasq)
-- VPN setup (WireGuard/OpenVPN)
 - Monitoring tools (Prometheus/Grafana)
 - QoS (Traffic shaping)
+- Intrusion Detection (Suricata/Snort)
 

@@ -1,6 +1,6 @@
 ---
 - name: Configure WAN PPPoE connection
-  hosts: router
+  hosts: routers
   become: yes
   
   tasks:
@@ -17,15 +17,11 @@
         wan_vlan_interface: "{{ wan_physical_interface }}.{{ wan_vlan }}"
       tags: always
     
-    - name: Install PPPoE and VLAN packages
-      ansible.builtin.apt:
-        name:
-          - pppoe
-          - pppoeconf
-          - vlan
-          - ppp
-        state: present
-        update_cache: yes
+    - name: Check if required PPPoE and VLAN packages are installed
+      ansible.builtin.command: dpkg -l pppoe pppoeconf vlan ppp
+      register: wan_packages_check
+      changed_when: false
+      failed_when: wan_packages_check.rc != 0
       tags: packages
       
     - name: Load 8021q kernel module for VLAN support
@@ -42,45 +38,77 @@
         mode: '0644'
       tags: vlan
       
-    - name: Configure physical WAN interface in /etc/network/interfaces
-      ansible.builtin.blockinfile:
-        path: /etc/network/interfaces
-        block: |
-          # WAN physical interface - Configured by Ansible
-          auto {{ wan_physical_interface }}
-          iface {{ wan_physical_interface }} inet manual
-                  mtu 1512
-        marker: "# {mark} ANSIBLE MANAGED BLOCK - WAN Physical"
-        create: yes
-        mode: '0644'
+    - name: Ensure systemd-networkd directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/network
+        state: directory
+        mode: '0755'
       tags: configure
       
-    - name: Configure VLAN interface in /etc/network/interfaces
-      ansible.builtin.blockinfile:
-        path: /etc/network/interfaces
-        block: |
-          # WAN VLAN interface - Configured by Ansible
-          auto {{ wan_vlan_interface }}
-          iface {{ wan_vlan_interface }} inet manual
-                  mtu 1508
-        marker: "# {mark} ANSIBLE MANAGED BLOCK - WAN VLAN"
-        create: yes
+    - name: Configure physical WAN interface with systemd-networkd
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/10-{{ wan_physical_interface }}.network
+        content: |
+          [Match]
+          Name={{ wan_physical_interface }}
+          
+          [Link]
+          RequiredForOnline=no
+          MTUBytes=1512
+          
+          [Network]
+          VLAN={{ wan_vlan_interface }}
+          IPv4Forwarding=yes
         mode: '0644'
+      notify: restart networkd
       tags: configure
       
-    - name: Configure PPP interface in /etc/network/interfaces
-      ansible.builtin.blockinfile:
-        path: /etc/network/interfaces
-        block: |
-          # PPPoE interface - Configured by Ansible
-          auto ppp0
-          iface ppp0 inet ppp
-                  provider {{ ppp_provider }}
-                  accept_ra 2
-        marker: "# {mark} ANSIBLE MANAGED BLOCK - PPPoE"
-        create: yes
+    - name: Configure WAN VLAN netdev with systemd-networkd
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/10-{{ wan_vlan_interface }}.netdev
+        content: |
+          [NetDev]
+          Name={{ wan_vlan_interface }}
+          Kind=vlan
+          MTUBytes=1508
+          
+          [VLAN]
+          Id={{ wan_vlan }}
         mode: '0644'
+      notify: restart networkd
       tags: configure
+      
+    - name: Configure WAN VLAN network with systemd-networkd
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/10-{{ wan_vlan_interface }}.network
+        content: |
+          [Match]
+          Name={{ wan_vlan_interface }}
+          
+          [Link]
+          RequiredForOnline=no
+          
+          [Network]
+          # Interface for PPPoE - no IP configuration needed
+          IPv4Forwarding=yes
+        mode: '0644'
+      notify: restart networkd
+      tags: configure
+      
+    - name: Enable systemd-networkd
+      ansible.builtin.systemd:
+        name: systemd-networkd
+        enabled: yes
+        state: started
+      tags: packages
+      
+    - name: Disable old networking service (if exists)
+      ansible.builtin.systemd:
+        name: networking
+        enabled: no
+        state: stopped
+      ignore_errors: yes
+      tags: packages
       
     - name: Ensure /etc/ppp/peers directory exists
       ansible.builtin.file:
@@ -122,17 +150,84 @@
         access_time: preserve
       tags: ppp
       
+    - name: Enable PPPoE service to start on boot
+      ansible.builtin.systemd:
+        name: ppp@{{ ppp_provider }}.service
+        enabled: yes
+      tags: ppp
+      
+    - name: Start PPPoE connection now
+      ansible.builtin.systemd:
+        name: ppp@{{ ppp_provider }}.service
+        state: started
+      tags: ppp
+      ignore_errors: yes
+      
+    - name: Wait for PPP interface to come up
+      ansible.builtin.wait_for:
+        timeout: 15
+      tags: ppp
+      delegate_to: localhost
+      
+    - name: Check if ppp0 interface exists
+      ansible.builtin.command: ip link show ppp0
+      register: ppp0_check
+      ignore_errors: yes
+      changed_when: false
+      tags: validate
+      
+    - name: Display PPP interface status
+      ansible.builtin.debug:
+        msg: "PPP interface status: {{ 'CONNECTED' if ppp0_check.rc == 0 else 'NOT CONNECTED - Check logs with: journalctl -u pppoe-wan -n 50' }}"
+      tags: validate
+      
+    - name: Check if WAN physical interface exists
+      ansible.builtin.command: ip link show {{ wan_physical_interface }}
+      register: wan_physical_check
+      ignore_errors: yes
+      changed_when: false
+      tags: validate
+      
+    - name: Display WAN physical interface status
+      ansible.builtin.debug:
+        msg: "WAN physical interface {{ wan_physical_interface }} status: {{ 'EXISTS' if wan_physical_check.rc == 0 else 'NOT FOUND' }}"
+      tags: validate
+      
+    - name: Check if WAN VLAN interface exists
+      ansible.builtin.command: ip link show {{ wan_vlan_interface }}
+      register: wan_vlan_check
+      ignore_errors: yes
+      changed_when: false
+      tags: validate
+      
+    - name: Display WAN VLAN interface status
+      ansible.builtin.debug:
+        msg: "WAN VLAN interface {{ wan_vlan_interface }} status: {{ 'EXISTS' if wan_vlan_check.rc == 0 else 'NOT FOUND' }}"
+      tags: validate
+      
     - name: Display WAN configuration summary
       ansible.builtin.debug:
         msg: |
           WAN Configuration Summary:
-          - Physical Interface: {{ wan_physical_interface }}
-          - VLAN Interface: {{ wan_vlan_interface }}
+          - Physical Interface: {{ wan_physical_interface }} (configured with systemd-networkd)
+          - VLAN Interface: {{ wan_vlan_interface }} (VLAN {{ wan_vlan }})
           - PPP Provider: {{ ppp_provider }}
           - PPP User: {{ ppp_user }}
+          - PPPoE Service: ppp@{{ ppp_provider }}.service (auto-starts on boot)
           
-          To start the connection manually: pon {{ ppp_provider }}
-          To stop the connection: poff {{ ppp_provider }}
-          To check status: plog
+          Manual Control:
+          - Start connection:  systemctl start ppp@{{ ppp_provider }}.service  (or: pon {{ ppp_provider }})
+          - Stop connection:   systemctl stop ppp@{{ ppp_provider }}.service   (or: poff {{ ppp_provider }})
+          - Service status:    systemctl status ppp@{{ ppp_provider }}.service
+          - View logs:         journalctl -u ppp@{{ ppp_provider }}.service -f
+          - Check PPP status:  ip addr show ppp0
+          - Test internet:     ping -c 3 8.8.8.8
       tags: info
+  
+  handlers:
+    - name: restart networkd
+      ansible.builtin.systemd:
+        name: systemd-networkd
+        state: restarted
+      # Note: This may temporarily affect network connectivity
 

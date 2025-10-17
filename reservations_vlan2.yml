@@ -1,0 +1,28 @@
+---
+# DHCP Reservations for VLAN 2 (Main Network)
+# 
+# Add your static DHCP reservations here.
+# Each reservation needs a MAC address, IP address, and hostname.
+#
+
+
+reservations:
+  - mac: "1c:0b:8b:54:6a:fb"
+    ip: "192.168.2.20"
+    hostname: "sedusa"
+  
+  - mac: "e8:9c:25:2d:78:a9"
+    ip: "192.168.2.50"
+    hostname: "amouba"
+
+  - mac: "32:46:d8:d6:b6:53"
+    ip: "192.168.2.51"
+    hostname: "amouba-wifi"
+
+  - mac: "60:7d:09:71:44:33"
+    ip: "192.168.2.60"
+    hostname: "utonium" 
+
+  - mac: "4c:49:6c:2a:31:81"
+    ip: "192.168.2.61"
+    hostname: "utonium-wifi" 
