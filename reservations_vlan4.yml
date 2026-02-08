@@ -18,5 +18,8 @@
 #     ip: "192.168.4.102"
 #     hostname: "zigbee-coordinator"
 
-reservations: []
+reservations:
+  - mac: "2c:cf:67:06:8c:74"
+    ip: "192.168.4.10"
+    hostname: "home-assistant"
 

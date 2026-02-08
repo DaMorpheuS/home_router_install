@@ -26,3 +26,8 @@ reservations:
   - mac: "4c:49:6c:2a:31:81"
     ip: "192.168.2.61"
     hostname: "utonium-wifi" 
+  
+  - mac: "00:07:4D:A5:B7:00"
+    ip: "192.168.2.80"
+    hostname: "zebra-test"
+    

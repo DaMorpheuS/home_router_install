@@ -232,6 +232,11 @@
                   # Drop invalid packets
                   ct state invalid drop
                   
+                  # === Port forwarding rules for Satisfactory server (192.168.3.10) ===
+                  iifname "{{ wan_interface }}" ip daddr 192.168.3.10 tcp dport 7777 accept comment "Allow Satisfactory Game Port TCP"
+                  iifname "{{ wan_interface }}" ip daddr 192.168.3.10 udp dport 7777 accept comment "Allow Satisfactory Game Port UDP"
+                  iifname "{{ wan_interface }}" ip daddr 192.168.3.10 tcp dport 8888 accept comment "Allow Satisfactory Reliable Messaging Port"
+                  
                 # === VLAN 2 (192.168.2.0/24) - Main Network - Full Access ===
                 # VLAN 2 can access VLAN 3 (bidirectional)
                 ip saddr $VLAN2_NET ip daddr $VLAN3_NET accept
@@ -250,6 +255,9 @@
                 ip saddr $VLAN2_NET oifname "{{ wan_interface }}" accept
                 
                 # === VLAN 3 (192.168.3.0/24) - Isolated + Internet ===
+                # VLAN 3 can access VLAN 4
+                ip saddr $VLAN3_NET ip daddr $VLAN4_NET accept
+                
                 # VLAN 3 can access internet
                 ip saddr $VLAN3_NET oifname "{{ wan_interface }}" accept
 
@@ -280,8 +288,17 @@
               }
           }
           
-          # NAT table for masquerading
+          # NAT table for masquerading and port forwarding
           table ip nat {
+              chain prerouting {
+                  type nat hook prerouting priority dstnat; policy accept;
+                  
+                  # Port forwarding for Satisfactory game server (192.168.3.10)
+                  iifname "{{ wan_interface }}" tcp dport 7777 dnat to 192.168.3.10:7777 comment "Satisfactory Game Port TCP"
+                  iifname "{{ wan_interface }}" udp dport 7777 dnat to 192.168.3.10:7777 comment "Satisfactory Game Port UDP"
+                  iifname "{{ wan_interface }}" tcp dport 8888 dnat to 192.168.3.10:8888 comment "Satisfactory Reliable Messaging Port"
+              }
+              
               chain postrouting {
                   type nat hook postrouting priority srcnat; policy accept;
                   
@@ -390,10 +407,10 @@
           Routing Rules (nftables):
           1. All networks have internet access through {{ wan_interface }}
           2. VLAN 2 ({{ vlan2_network }}) - Main network - can access all VLANs
-          3. VLAN 3 ({{ vlan3_network }}) is isolated - only internet and VLAN 2
+          3. VLAN 3 ({{ vlan3_network }}) - can access internet, VLAN 2, and VLAN 4
           4. VLAN 4 ({{ vlan4_network }}) is isolated - only internet and VLAN 2
           5. VLAN 5 ({{ vlan5_network }}) is GUEST - ONLY internet access (fully isolated)
-          6. VLAN 3 and VLAN 4 cannot communicate with each other
+          6. VLAN 4 cannot initiate connections to VLAN 3 (one-way access from VLAN 3 to VLAN 4)
           
           Security Features:
           - SSH/Telnet blocked from WAN ({{ wan_interface }})
@@ -411,6 +428,10 @@
           - 8880/8843 (TCP) - Guest Portal - VLAN 2 only, blocked from WAN
           - 10001 (UDP) - Discovery - All VLANs, blocked from WAN
           - 1900 (UDP) - AP EDU - All VLANs, blocked from WAN
+          
+          Port Forwarding Rules:
+          - 7777 (TCP/UDP) -> 192.168.3.10:7777 - Satisfactory Game Server
+          - 8888 (TCP) -> 192.168.3.10:8888 - Satisfactory Reliable Messaging
           
           Management Commands:
           - View all rules:          nft list ruleset
@@ -439,11 +460,11 @@
     - name: Test routing from VLAN 3 (optional)
       ansible.builtin.debug:
         msg: |
-          To test VLAN 3 isolation, from a device on VLAN 3:
+          To test VLAN 3 routing, from a device on VLAN 3:
           - ping 192.168.3.1 (gateway) - should work
           - ping 8.8.8.8 (internet) - should work
           - ping 192.168.2.x (VLAN 2 - main network) - should work
-          - ping 192.168.4.x (VLAN 4) - should FAIL
+          - ping 192.168.4.x (VLAN 4) - should work
       tags: testing
       
     - name: Test routing from VLAN 4 (optional)
