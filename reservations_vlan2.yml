@@ -30,4 +30,9 @@ reservations:
   - mac: "00:07:4D:A5:B7:00"
     ip: "192.168.2.80"
     hostname: "zebra-test"
+
+  - mac: "f8:ed:fc:f7:25:4a"
+    ip: "192.168.2.81"
+    hostname: "zebra-test-2"
+  
     

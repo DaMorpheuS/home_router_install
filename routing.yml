@@ -249,7 +249,7 @@
                 ip saddr $VLAN2_NET ip daddr $IPSEC_DOUBLEME_NET accept
                 
                 # IPsec Koopmans network can access specific devices in VLAN 2
-                ip saddr $IPSEC_KOOPMANS_NET ip daddr { 192.168.2.50, 192.168.2.51, 192.168.2.60, 192.168.2.61 } accept
+                ip saddr $IPSEC_KOOPMANS_NET ip daddr { 192.168.2.50, 192.168.2.51, 192.168.2.60, 192.168.2.61, 192.168.2.80 } accept
                 
                 # VLAN 2 can access internet
                 ip saddr $VLAN2_NET oifname "{{ wan_interface }}" accept
