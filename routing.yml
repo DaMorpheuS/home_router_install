@@ -255,6 +255,9 @@
                 ip saddr $VLAN2_NET oifname "{{ wan_interface }}" accept
                 
                 # === VLAN 3 (192.168.3.0/24) - Isolated + Internet ===
+                # VLAN 3 can access printer at 192.168.2.81 only (not rest of VLAN 2)
+                ip saddr $VLAN3_NET ip daddr 192.168.2.81 accept comment "VLAN 3 to printer"
+                
                 # VLAN 3 can access VLAN 4
                 ip saddr $VLAN3_NET ip daddr $VLAN4_NET accept
                 
