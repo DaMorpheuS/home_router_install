@@ -20,6 +20,11 @@
     vlan5_network: 192.168.5.0/24
     vlan5_interface: enp3s0.5
     
+    # WireGuard (used by nftables defines and NAT; wireguard.yml uses the same values)
+    wireguard_vpn_network: 10.200.0.0/24
+    wireguard_interface: wg0
+    wireguard_listen_port: 51820
+    
   tasks:
     - name: Gather distribution facts
       ansible.builtin.setup:
@@ -113,6 +118,31 @@
       tags: firewall
       ignore_errors: yes
       
+    - name: Ensure nftables.d exists for WireGuard fragments
+      ansible.builtin.file:
+        path: /etc/nftables.d
+        state: directory
+        mode: '0755'
+      tags: firewall
+      
+    - name: Placeholder WireGuard nftables forward fragment (wireguard.yml overwrites)
+      ansible.builtin.copy:
+        dest: /etc/nftables.d/wireguard-forward.inc
+        mode: '0644'
+        force: false
+        content: |
+          # Placeholder — populated by wireguard.yml
+      tags: firewall
+      
+    - name: Placeholder WireGuard nftables input fragment (wireguard.yml overwrites)
+      ansible.builtin.copy:
+        dest: /etc/nftables.d/wireguard-input.inc
+        mode: '0644'
+        force: false
+        content: |
+          # Placeholder — populated by wireguard.yml
+      tags: firewall
+      
     - name: Create nftables configuration
       ansible.builtin.copy:
         dest: /etc/nftables.conf
@@ -141,6 +171,8 @@
           define IPSEC_KOOPMANS_NET = 192.168.100.0/24
           define IPSEC_DOUBLEME_NET = 192.168.20.0/24
           
+          define WG_NET = {{ wireguard_vpn_network }}
+          
           # Main table for filtering and NAT
           table inet filter {
               
@@ -156,6 +188,11 @@
                   
                   # Drop invalid packets
                   ct state invalid drop
+                  
+                  # WireGuard VPN (included fragment; managed by wireguard.yml)
+                  include "/etc/nftables.d/wireguard-input.inc"
+                  
+                  iifname "{{ wan_interface }}" udp dport {{ wireguard_listen_port }} accept comment "WireGuard inbound"
                   
                   # === SECURITY: Block ALL management from WAN/Internet ===
                   iifname "{{ wan_interface }}" tcp dport 22 drop
@@ -231,6 +268,9 @@
                   
                   # Drop invalid packets
                   ct state invalid drop
+                  
+                  # WireGuard VPN (included fragment; managed by wireguard.yml)
+                  include "/etc/nftables.d/wireguard-forward.inc"
                   
                   # === Port forwarding rules for Satisfactory server (192.168.3.10) ===
                   iifname "{{ wan_interface }}" ip daddr 192.168.3.10 tcp dport 7777 accept comment "Allow Satisfactory Game Port TCP"
@@ -312,6 +352,7 @@
                   ip saddr $VLAN3_NET oifname "{{ wan_interface }}" masquerade
                   ip saddr $VLAN4_NET oifname "{{ wan_interface }}" masquerade
                   ip saddr $VLAN5_NET oifname "{{ wan_interface }}" masquerade
+                  ip saddr $WG_NET oifname "{{ wan_interface }}" masquerade comment "WireGuard VPN to internet"
               }
           }
       tags: firewall

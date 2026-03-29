@@ -1,0 +1,22 @@
+{% if (wireguard_peers | length > 0) or (wireguard_site_peers | default([]) | length > 0) %}
+{% if wireguard_peers | length > 0 %}
+                  # WireGuard VPN — DNS and ICMP to router
+                  iifname "{{ wireguard_interface }}" ip saddr $WG_NET udp dport 53 accept
+                  iifname "{{ wireguard_interface }}" ip saddr $WG_NET tcp dport 53 accept
+                  iifname "{{ wireguard_interface }}" ip saddr $WG_NET icmp type echo-request accept
+{% for peer in wireguard_peers %}
+{% if peer.access | default('') == 'all' %}
+                  iifname "{{ wireguard_interface }}" ip saddr {{ peer.address.split('/')[0] }} tcp dport 22 accept comment "WireGuard admin SSH"
+{% endif %}
+{% endfor %}
+{% endif %}
+{% for site in wireguard_site_peers | default([]) %}
+{% for net in site.allowed_ips %}
+                  iifname "{{ wireguard_interface }}" ip saddr {{ net }} icmp type echo-request accept comment "site {{ site.name }}"
+                  iifname "{{ wireguard_interface }}" ip saddr {{ net }} udp dport 53 accept comment "site {{ site.name }}"
+                  iifname "{{ wireguard_interface }}" ip saddr {{ net }} tcp dport 53 accept comment "site {{ site.name }}"
+{% endfor %}
+{% endfor %}
+{% else %}
+                  # WireGuard — no peers configured (wireguard.yml)
+{% endif %}

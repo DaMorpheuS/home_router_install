@@ -1,0 +1,18 @@
+---
+# Road-warrior peers (laptop/phone): public_key + address + access or vlans — see wireguard.yml header
+wireguard_peers:
+  - name: utonium
+    access: all
+    address: 10.200.0.2/32
+    public_key: "e5A+BxkYl91sk71gW4pFW8si6a3OF8pTgdrbkMz5ilU="
+
+# Site-to-site peers (remote routers / fixed endpoints): AllowedIPs = remote LANs behind the other side
+wireguard_site_peers:
+  - name: leon
+    public_key: OD97ON6ZmBXqJmxOi7k8Y+t7I9JPig7skvFa1k8KkUE=
+    endpoint: "81.205.207.236:65431"
+    allowed_ips:
+      - 172.31.0.0/16
+    persistent_keepalive: 25
+
+wireguard_public_host: ""

@@ -1,0 +1,28 @@
+# Managed by Ansible — replace PrivateKey with output of: wg genkey
+# Peer: {{ peer.name }}
+[Interface]
+PrivateKey = <PASTE_CLIENT_PRIVATE_KEY_HERE>
+Address = {{ peer.address }}
+{% if peer.dns is defined %}
+DNS = {{ peer.dns }}
+{% elif peer.access | default('') == 'all' %}
+DNS = {{ wireguard_default_dns }}
+{% elif peer.vlans is defined and peer.vlans | length == 1 %}
+DNS = {{ hostvars[inventory_hostname]['vlan' + (peer.vlans | first | string) + '_ip'] }}
+{% else %}
+DNS = {{ wireguard_default_dns }}
+{% endif %}
+
+[Peer]
+PublicKey = {{ wireguard_server_public_key }}
+Endpoint = {{ wireguard_endpoint_host }}:{{ wireguard_endpoint_port | string }}
+{% if peer.access | default('') == 'all' %}
+{% set nets = [vlan2_network, vlan3_network, vlan4_network] %}
+{% if wireguard_admin_include_guest_vlan | default(true) %}
+{% set nets = nets + [vlan5_network] %}
+{% endif %}
+AllowedIPs = {{ nets | join(', ') }}
+{% elif peer.vlans is defined %}
+AllowedIPs = {% for vid in peer.vlans %}{{ hostvars[inventory_hostname]['vlan' + (vid | string) + '_network'] }}{% if not loop.last %}, {% endif %}{% endfor %}
+{% endif %}
+PersistentKeepalive = 25

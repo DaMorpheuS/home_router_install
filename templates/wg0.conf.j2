@@ -1,0 +1,24 @@
+# Managed by Ansible (wireguard.yml)
+[Interface]
+Address = {{ wireguard_server_address }}
+ListenPort = {{ wireguard_listen_port }}
+PrivateKey = {{ wireguard_server_private_key }}
+
+{% for peer in wireguard_peers %}
+[Peer]
+# {{ peer.name }}
+PublicKey = {{ peer.public_key }}
+AllowedIPs = {{ peer.address | regex_replace('/.*$', '') }}/32
+
+{% endfor %}
+{% for peer in wireguard_site_peers | default([]) %}
+[Peer]
+# Site-to-site: {{ peer.name }}
+PublicKey = {{ peer.public_key }}
+Endpoint = {{ peer.endpoint }}
+AllowedIPs = {{ peer.allowed_ips | join(', ') }}
+{% if peer.persistent_keepalive | default(25) | int > 0 %}
+PersistentKeepalive = {{ peer.persistent_keepalive | default(25) }}
+{% endif %}
+
+{% endfor %}

@@ -1,5 +1,6 @@
 *.retry
 .vault_pass
+group_vars/routers/wireguard_vault.yml
 *.log
 *.swp
 *~

@@ -1,0 +1,240 @@
+---
+# WireGuard road-warrior VPN with per-peer VLAN access (nftables enforces policy).
+#
+# How to add a peer (repeat for each device/user):
+#   1. On your laptop:  umask 077 && wg genkey | tee wg-private.key | wg pubkey
+#   2. Pick a unique VPN address in 10.200.0.0/24 (e.g. 10.200.0.2/32, 10.200.0.3/32).
+#   3. In inventory (or ansible-vault file), add to wireguard_peers:
+#        - name: admin
+#          access: all                    # all VLANs (optional: guest VLAN via wireguard_admin_include_guest_vlan)
+#          address: 10.200.0.2/32
+#          public_key: "<paste wg pubkey>"
+#        - name: vlan3-only
+#          vlans: [3]                    # only 192.168.3.0/24
+#          address: 10.200.0.3/32
+#          public_key: "<paste>"
+#        - name: vlan3-and-4
+#          vlans: [3, 4]
+#          address: 10.200.0.4/32
+#          public_key: "<paste>"
+#   4. Set wireguard_server_private_key (strongly recommended: ansible-vault).
+#   5. Set wireguard_public_host to your WAN IP or DNS name clients use to reach the router.
+#   6. Run: ansible-playbook wireguard.yml
+#   7. Fetch client snippets from the router: /root/wireguard-clients/*.conf — paste the private key from step 1.
+#
+# Site-to-site (remote LANs, e.g. another home): set wireguard_site_peers in group_vars/routers/main.yml
+#   (name, public_key, endpoint, allowed_ips list). nftables allows those remote nets <-> local VLANs.
+#
+# Depends on routing.yml having WireGuard nftables includes (placeholder fragments are created there).
+#
+- name: Deploy WireGuard VPN on router
+  hosts: routers
+  become: yes
+
+  vars:
+    wireguard_interface: wg0
+    wireguard_listen_port: 51820
+    wireguard_vpn_network: 10.200.0.0/24
+    wireguard_server_address: 10.200.0.1/24
+    wireguard_endpoint_port: 51820
+    wireguard_admin_include_guest_vlan: true
+    wireguard_allow_internet: true
+    wan_interface: ppp0
+
+  tasks:
+    # group_vars may define wireguard_peers; do not set it in play vars with {{ wireguard_peers | default([]) }} — that recurses.
+    - name: Coalesce wireguard_peers from group_vars
+      ansible.builtin.set_fact:
+        wireguard_peers: "{{ wireguard_peers | default([]) }}"
+
+    - name: Coalesce wireguard_site_peers from group_vars
+      ansible.builtin.set_fact:
+        wireguard_site_peers: "{{ wireguard_site_peers | default([]) }}"
+
+    - name: Decide whether to deploy WireGuard (road-warrior and/or site-to-site)
+      ansible.builtin.set_fact:
+        wireguard_deploy: "{{ (wireguard_peers | length > 0) or (wireguard_site_peers | length > 0) }}"
+
+    - name: Normalize VLAN CIDRs for templates
+      ansible.builtin.set_fact:
+        vlan2_network: "{{ vlan2_network | default('192.168.2.0/24') }}"
+        vlan3_network: "{{ vlan3_network | default('192.168.3.0/24') }}"
+        vlan4_network: "{{ vlan4_network | default('192.168.4.0/24') }}"
+        vlan5_network: "{{ vlan5_network | default('192.168.5.0/24') }}"
+
+    - name: Set WireGuard endpoint host
+      ansible.builtin.set_fact:
+        wireguard_endpoint_host: "{{ wireguard_public_host | default(ansible_host, true) }}"
+
+    - name: Set default DNS for admin clients (VLAN 2 gateway)
+      ansible.builtin.set_fact:
+        wireguard_default_dns: "{{ vlan2_ip }}"
+
+    # group_vars/routers/wireguard_vault.yml is gitignored — copy from wireguard_vault.yml.example if missing.
+    - name: Optional WireGuard server key from WIREGUARD_SERVER_PRIVATE_KEY (one-off runs)
+      ansible.builtin.set_fact:
+        wireguard_server_private_key: "{{ lookup('env', 'WIREGUARD_SERVER_PRIVATE_KEY') }}"
+      when:
+        - wireguard_deploy | bool
+        - wireguard_server_private_key is not defined or (wireguard_server_private_key | default('') | trim | length == 0)
+        - (lookup('env', 'WIREGUARD_SERVER_PRIVATE_KEY') | default('', true) | trim | length) > 0
+      no_log: true
+
+    - name: Require server private key when peers are defined
+      ansible.builtin.assert:
+        that:
+          - wireguard_server_private_key is defined
+          - wireguard_server_private_key | length > 0
+        fail_msg: >-
+          Missing wireguard_server_private_key. Create group_vars/routers/wireguard_vault.yml
+          (copy group_vars/routers/wireguard_vault.yml.example) and set wireguard_server_private_key to one line from wg genkey,
+          or run: WIREGUARD_SERVER_PRIVATE_KEY="$(cat /path/to/server.key)" ansible-playbook wireguard.yml
+      when: wireguard_deploy | bool
+
+    - name: Ensure site-to-site peers have required fields
+      ansible.builtin.assert:
+        that:
+          - item.public_key is defined and item.public_key | length > 0
+          - item.endpoint is defined and item.endpoint | length > 0
+          - item.allowed_ips is defined and item.allowed_ips | length > 0
+        fail_msg: "Site peer {{ item.name }} needs public_key, endpoint, and allowed_ips (list of CIDRs)."
+      loop: "{{ wireguard_site_peers }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: wireguard_site_peers | length > 0
+
+    - name: Ensure WireGuard peer addresses are unique
+      ansible.builtin.assert:
+        that:
+          - wireguard_peers | map(attribute='address') | list | unique | length == wireguard_peers | length
+        fail_msg: "Each WireGuard peer needs a unique address (e.g. 10.200.0.2/32)."
+      when: wireguard_peers | length > 0
+
+    - name: Ensure each peer has public_key and either access all or vlans list
+      ansible.builtin.assert:
+        that:
+          - item.public_key is defined and item.public_key | length > 0
+          - (item.access | default('') == 'all') or (item.vlans is defined and item.vlans | length > 0)
+        fail_msg: "Peer {{ item.name }} needs public_key and either access: all or vlans: [2,3,...]"
+      loop: "{{ wireguard_peers }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Ensure VLAN ids are 2–5 for restricted peers
+      ansible.builtin.assert:
+        that:
+          - item.1 | int in [2, 3, 4, 5]
+        fail_msg: "Peer {{ item.0.name }} has invalid VLAN id {{ item.1 }} (allowed 2–5)."
+      loop: "{{ wireguard_peers | subelements('vlans', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} vlan {{ item.1 }}"
+      when: wireguard_peers | length > 0
+
+    - name: Install WireGuard tools
+      ansible.builtin.apt:
+        name:
+          - wireguard
+          - wireguard-tools
+          - qrencode
+        state: present
+      tags:
+        - packages
+
+    - name: Derive WireGuard server public key
+      ansible.builtin.shell: |
+        set -euo pipefail
+        printf '%s' '{{ wireguard_server_private_key }}' | wg pubkey
+      register: wireguard_server_public_key_cmd
+      changed_when: false
+      no_log: true
+      when: wireguard_deploy | bool
+
+    - name: Record server public key
+      ansible.builtin.set_fact:
+        wireguard_server_public_key: "{{ wireguard_server_public_key_cmd.stdout | trim }}"
+      when: wireguard_deploy | bool
+
+    - name: Deploy WireGuard interface configuration
+      ansible.builtin.template:
+        src: templates/wg0.conf.j2
+        dest: /etc/wireguard/wg0.conf
+        mode: "0600"
+      when: wireguard_deploy | bool
+      notify: Restart wg-quick@wg0
+
+    - name: Remove wg0 config when no peers
+      ansible.builtin.file:
+        path: /etc/wireguard/wg0.conf
+        state: absent
+      when: not (wireguard_deploy | bool)
+      notify: Stop wg-quick@wg0
+
+    - name: Deploy nftables forward fragment for WireGuard
+      ansible.builtin.template:
+        src: templates/wireguard-forward.inc.j2
+        dest: /etc/nftables.d/wireguard-forward.inc
+        mode: "0644"
+      notify: Reload nftables
+
+    - name: Deploy nftables input fragment for WireGuard
+      ansible.builtin.template:
+        src: templates/wireguard-input.inc.j2
+        dest: /etc/nftables.d/wireguard-input.inc
+        mode: "0644"
+      notify: Reload nftables
+
+    - name: Create directory for generated client configs
+      ansible.builtin.file:
+        path: /root/wireguard-clients
+        state: directory
+        mode: "0700"
+      when: wireguard_peers | length > 0
+
+    - name: Generate per-peer client configuration snippets
+      ansible.builtin.template:
+        src: templates/wireguard-client.conf.j2
+        dest: "/root/wireguard-clients/{{ peer.name }}.conf"
+        mode: "0600"
+      loop: "{{ wireguard_peers }}"
+      loop_control:
+        loop_var: peer
+        label: "{{ peer.name }}"
+      when: wireguard_peers | length > 0
+
+    - name: Enable and start WireGuard
+      ansible.builtin.systemd:
+        name: "wg-quick@{{ wireguard_interface }}"
+        enabled: yes
+        state: started
+      when: wireguard_deploy | bool
+
+    - name: Disable WireGuard when no peers
+      ansible.builtin.systemd:
+        name: "wg-quick@{{ wireguard_interface }}"
+        enabled: no
+        state: stopped
+      when: not (wireguard_deploy | bool)
+      ignore_errors: yes
+
+    - name: Show where client configs were written
+      ansible.builtin.debug:
+        msg: "Client templates (add private keys locally): /root/wireguard-clients/ — use qrencode -t ansiutf8 < file.conf for QR"
+      when: wireguard_peers | length > 0
+
+  handlers:
+    - name: Restart wg-quick@wg0
+      ansible.builtin.systemd:
+        name: "wg-quick@{{ wireguard_interface }}"
+        state: restarted
+        enabled: yes
+
+    - name: Stop wg-quick@wg0
+      ansible.builtin.systemd:
+        name: "wg-quick@{{ wireguard_interface }}"
+        state: stopped
+        enabled: no
+      ignore_errors: yes
+
+    - name: Reload nftables
+      ansible.builtin.command: nft -f /etc/nftables.conf
+      changed_when: true
