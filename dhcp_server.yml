@@ -143,7 +143,7 @@
                   "subnet": "{{ vlan2_ip | regex_replace('\\.\\d+$', '.0') }}/24",
                   "pools": [
                     {
-                      "pool": "{{ vlan2_dhcp_range_start | default(vlan2_ip | regex_replace('\\.\\d+$', '.50')) }} - {{ vlan2_dhcp_range_end | default(vlan2_ip | regex_replace('\\.\\d+$', '.150')) }}"
+                      "pool": "{{ vlan2_dhcp_range_start | default(vlan2_ip | regex_replace('\\.\\d+$', '.100')) }} - {{ vlan2_dhcp_range_end | default(vlan2_ip | regex_replace('\\.\\d+$', '.150')) }}"
                     }
                   ],
                   "option-data": [

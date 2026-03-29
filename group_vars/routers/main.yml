@@ -6,13 +6,21 @@ wireguard_peers:
     address: 10.200.0.2/32
     public_key: "e5A+BxkYl91sk71gW4pFW8si6a3OF8pTgdrbkMz5ilU="
 
+  # Phone — VLAN 4 only (split tunnel: only 192.168.4.0/24 via VPN; omit DNS so normal internet works)
+  - name: phone-ruben
+    vlans: [4]
+    dns: omit
+    address: 10.200.0.3/32
+    public_key: "9ryNRhSiGMoG31/KvF9y/4zTDFOe/dCVn5q/3TbybRA="
+
 # Site-to-site peers (remote routers / fixed endpoints): AllowedIPs = remote LANs behind the other side
 wireguard_site_peers:
   - name: leon
-    public_key: OD97ON6ZmBXqJmxOi7k8Y+t7I9JPig7skvFa1k8KkUE=
+    public_key: KtZcvvYieQwx7MPNMJg+5vJ59ZxzCvGF9rZTTQ4uPQM=
     endpoint: "81.205.207.236:65431"
     allowed_ips:
       - 172.31.0.0/16
     persistent_keepalive: 25
 
-wireguard_public_host: ""
+# WAN IP or DNS for road-warrior clients (WireGuard Endpoint)
+wireguard_public_host: "88.159.78.9"

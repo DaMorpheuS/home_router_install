@@ -13,9 +13,14 @@
 #          vlans: [3]                    # only 192.168.3.0/24
 #          address: 10.200.0.3/32
 #          public_key: "<paste>"
+#        - name: phone-split
+#          vlans: [4]
+#          dns: omit                     # optional: no DNS line — normal internet DNS on phones; only AllowedIPs via VPN
+#          address: 10.200.0.4/32
+#          public_key: "<paste>"
 #        - name: vlan3-and-4
 #          vlans: [3, 4]
-#          address: 10.200.0.4/32
+#          address: 10.200.0.5/32
 #          public_key: "<paste>"
 #   4. Set wireguard_server_private_key (strongly recommended: ansible-vault).
 #   5. Set wireguard_public_host to your WAN IP or DNS name clients use to reach the router.
