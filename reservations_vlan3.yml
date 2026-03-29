@@ -14,5 +14,9 @@
 #     ip: "192.168.3.101"
 #     hostname: "backup-server"
 
-reservations: []
+reservations: 
+  - mac: "00:08:9b:f7:8a:51"
+    ip: "192.168.3.90"
+    hostname: "townsville-2"
+
 

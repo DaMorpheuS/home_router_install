@@ -34,5 +34,8 @@ reservations:
   - mac: "f8:ed:fc:f7:25:4a"
     ip: "192.168.2.81"
     hostname: "zebra-test-2"
-  
+
+  - mac: "00:08:9b:f7:8a:50"
+    ip: "192.168.2.90"
+    hostname: "townsville-1"
     
