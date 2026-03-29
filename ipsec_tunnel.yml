@@ -9,7 +9,7 @@
     local_public_ip: "{{ ipsec_local_public_ip | default('%any') }}"  # Use %any for dynamic IP
     
     # Remote peer configuration
-    remote_peer_ip: "{{ ipsec_remote_peer_ip | default('213.124.134.50') }}"
+    remote_peer_ip: "{{ ipsec_remote_peer_ip | default('31.149.32.177') }}"
     
     # Tunnel 1: koopmans
     tunnel1_name: "{{ ipsec_tunnel1_name | default('koopmans') }}"
