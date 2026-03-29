@@ -28,7 +28,9 @@
 #   7. Fetch client snippets from the router: /root/wireguard-clients/*.conf — paste the private key from step 1.
 #
 # Site-to-site (remote LANs, e.g. another home): set wireguard_site_peers in group_vars/routers/main.yml
-#   (name, public_key, endpoint, allowed_ips list). nftables allows those remote nets <-> local VLANs.
+#   (name, public_key, endpoint, allowed_ips list). Remote nets may reach all local VLANs (2–5).
+#   Optional local_source_vlans: [2, ...] — which local VLANs may *initiate* traffic to those remote nets
+#   (default [2,3,4,5]). Return traffic for sessions started from the remote side still works (forward chain ct established).
 #
 # Depends on routing.yml having WireGuard nftables includes (placeholder fragments are created there).
 #
@@ -106,6 +108,16 @@
       loop: "{{ wireguard_site_peers }}"
       loop_control:
         label: "{{ item.name }}"
+      when: wireguard_site_peers | length > 0
+
+    - name: Ensure site peer local_source_vlans are 2–5 when set
+      ansible.builtin.assert:
+        that:
+          - item.1 | int in [2, 3, 4, 5]
+        fail_msg: "Site peer {{ item.0.name }} has invalid local_source_vlans entry {{ item.1 }} (allowed 2–5)."
+      loop: "{{ wireguard_site_peers | subelements('local_source_vlans', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} vlan {{ item.1 }}"
       when: wireguard_site_peers | length > 0
 
     - name: Ensure WireGuard peer addresses are unique

@@ -13,6 +13,12 @@ wireguard_peers:
     address: 10.200.0.3/32
     public_key: "9ryNRhSiGMoG31/KvF9y/4zTDFOe/dCVn5q/3TbybRA="
 
+  - name: phone-maxim
+    vlans: [4]
+    dns: omit
+    address: 10.200.0.4/32
+    public_key: "EvoFQ1NAPOzmKw+9cfDDP8ZTOu4rJYsniEkft/ji91Q="
+
 # Site-to-site peers (remote routers / fixed endpoints): AllowedIPs = remote LANs behind the other side
 wireguard_site_peers:
   - name: leon
@@ -21,6 +27,8 @@ wireguard_site_peers:
     allowed_ips:
       - 172.31.0.0/16
     persistent_keepalive: 25
+    # Only VLAN 2 may initiate traffic to 172.31.0.0/16; Leon may still reach VLANs 2–5 (replies use ct established)
+    local_source_vlans: [2]
 
 # WAN IP or DNS for road-warrior clients (WireGuard Endpoint)
 wireguard_public_host: "88.159.78.9"

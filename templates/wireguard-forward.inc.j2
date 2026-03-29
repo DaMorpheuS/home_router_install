@@ -18,16 +18,16 @@
 {% endfor %}
 {% endif %}
 {% for site in wireguard_site_peers | default([]) %}
+{% set outbound_vids = site.local_source_vlans | default([2, 3, 4, 5]) %}
 {% for net in site.allowed_ips %}
-                  # Site-to-site {{ site.name }} ({{ net }})
+                  # Site-to-site {{ site.name }} ({{ net }}) — remote may reach all VLANs; outbound to remote only from VLANs {{ outbound_vids | join(', ') }}
                   iifname "{{ wireguard_interface }}" ip saddr {{ net }} ip daddr $VLAN2_NET accept
                   iifname "{{ wireguard_interface }}" ip saddr {{ net }} ip daddr $VLAN3_NET accept
                   iifname "{{ wireguard_interface }}" ip saddr {{ net }} ip daddr $VLAN4_NET accept
                   iifname "{{ wireguard_interface }}" ip saddr {{ net }} ip daddr $VLAN5_NET accept
-                  ip saddr $VLAN2_NET ip daddr {{ net }} oifname "{{ wireguard_interface }}" accept
-                  ip saddr $VLAN3_NET ip daddr {{ net }} oifname "{{ wireguard_interface }}" accept
-                  ip saddr $VLAN4_NET ip daddr {{ net }} oifname "{{ wireguard_interface }}" accept
-                  ip saddr $VLAN5_NET ip daddr {{ net }} oifname "{{ wireguard_interface }}" accept
+{% for vid in outbound_vids %}
+                  ip saddr $VLAN{{ vid }}_NET ip daddr {{ net }} oifname "{{ wireguard_interface }}" accept
+{% endfor %}
 {% endfor %}
 {% endfor %}
 {% if wireguard_peers | length > 0 %}
